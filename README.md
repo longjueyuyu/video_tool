@@ -3,9 +3,9 @@
 一个功能强大的视频处理工具，主要使用ffmpeg处理剪切、合并、字幕功能，支持视频原画剪切、合并和字幕添加功能。采用图形化界面设计，操作简单直观。
 
 # 功能截图如下
+<img width="400" height="200" alt="image" src="https://github.com/user-attachments/assets/154237fe-8511-435a-888a-77e1b5fa185a" />
 <img width="400" height="200" alt="image" src="https://github.com/user-attachments/assets/2a1a1b67-9143-4979-9663-c9254ee0d561" />
 <img width="400" height="200" alt="image" src="https://github.com/user-attachments/assets/adfefd5e-b87d-460d-947b-bc7f53aa52d1" />
-![Uploading image.png…]()
 
 
 
@@ -297,4 +297,5 @@ video_cut/
 ---
 
 **注意**: 本工具处理大型视频文件时可能需要较长时间，请耐心等待。建议在处理前确保硬盘有足够的可用空间。
+
 
