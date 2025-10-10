@@ -1,6 +1,13 @@
 # 专业视频剪辑工具
 
-一个功能强大的视频处理工具，支持视频剪切、合并和字幕添加功能。采用图形化界面设计，操作简单直观。
+一个功能强大的视频处理工具，主要使用ffmpeg处理剪切、合并、字幕功能，支持视频原画剪切、合并和字幕添加功能。采用图形化界面设计，操作简单直观。
+
+# 功能截图如下
+<img width="400" height="200" alt="image" src="https://github.com/user-attachments/assets/2a1a1b67-9143-4979-9663-c9254ee0d561" />
+<img width="400" height="200" alt="image" src="https://github.com/user-attachments/assets/adfefd5e-b87d-460d-947b-bc7f53aa52d1" />
+![Uploading image.png…]()
+
+
 
 ## 功能特性
 
@@ -8,7 +15,7 @@
 - 支持精确到毫秒级的视频剪切
 - 可视化时间轴拖拽操作
 - 实时预览功能
-- 支持8K高分辨率视频处理
+- 支持4K高分辨率视频处理
 - 硬件加速支持（自动检测）
 
 ### 2. 视频合并
@@ -285,6 +292,7 @@ video_cut/
 
 - FFmpeg项目提供的强大视频处理能力
 - Python开源社区的各项优秀库
+- 希望大家一起增加完善
 
 ---
 
