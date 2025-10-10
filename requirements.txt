@@ -1,0 +1,17 @@
+# 专业视频剪辑工具 - Python依赖包
+# Python 3.7+ required
+
+# GUI相关
+tkinterdnd2>=0.3.0          # 拖放功能支持
+
+# 图像处理
+Pillow>=9.0.0               # PIL图像处理库
+
+# 视频处理
+opencv-python>=4.5.0        # OpenCV视频处理
+
+# 注意：
+# 1. tkinter 是Python标准库，无需单独安装
+# 2. FFmpeg 需要单独安装（详见README.md）
+# 3. 如果opencv-python安装失败，可尝试安装opencv-python-headless
+
