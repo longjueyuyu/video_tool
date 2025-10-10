@@ -2447,12 +2447,12 @@ class VideoTrimmerPro:
                 subtitle_filter = 'format=yuv420p'
                 print(f"使用无字幕滤镜: {subtitle_filter}")
             
-            # 使用双引号包围参数，参考您提供的正确命令格式
+            # 构建FFmpeg命令 - 不要在这里加引号，在subprocess调用时统一处理
             ffmpeg_cmd = [
                 FFMPEG_PATH,
                 '-y',
-                '-i', f'"{video_path_clean}"',
-                '-vf', f'"{subtitle_filter}"'
+                '-i', video_path_clean,
+                '-vf', subtitle_filter
             ]
             
             # 获取用户指定的比特率
@@ -2514,8 +2514,7 @@ class VideoTrimmerPro:
                     '-ac', '2'
                 ])
             
-            # 添加其他参数
-            # 使用双引号包围输出路径
+            # 添加其他参数 - 不要在这里加引号，在subprocess调用时统一处理
             ffmpeg_cmd.extend([
                 '-avoid_negative_ts', '1',
                 '-threads', '4',
@@ -2525,7 +2524,7 @@ class VideoTrimmerPro:
                 '-f', 'mp4',               # 强制使用MP4格式
                 '-reset_timestamps', '1',  # 重置时间戳
                 '-fflags', '+genpts',      # 生成时间戳
-                f'"{save_path}"'
+                save_path
             ])
             
             print("FFmpeg命令:")
@@ -2606,7 +2605,21 @@ class VideoTrimmerPro:
             # 在Windows上，当命令包含引号时，需要使用shell=True
             if sys.platform == 'win32':
                 # 将命令列表转换为字符串，确保路径编码正确
-                cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in cmd)
+                # 特别处理包含特殊字符（空格、中文、&等）的参数
+                def quote_arg(arg):
+                    # 如果参数包含空格、中文、&或其他特殊字符，需要加引号
+                    if ' ' in arg or any(ord(c) > 127 for c in arg) or '&' in arg or "'" in arg:
+                        # 对于包含单引号的参数（如-vf参数），需要特殊处理
+                        if "'" in arg:
+                            # 使用双引号包围，并转义内部的双引号（如果有）
+                            arg = arg.replace('"', '\\"')
+                        return f'"{arg}"'
+                    return arg
+                
+                cmd_str = ' '.join(quote_arg(arg) for arg in cmd)
+                
+                print(f"\n[DEBUG] 最终执行的命令字符串:\n{cmd_str}\n")
+                
                 process = subprocess.Popen(
                     cmd_str,
                     shell=True,
