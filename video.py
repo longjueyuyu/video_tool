@@ -3204,60 +3204,45 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         try:
             # 获取当前时间和进度
             current_frame = self.subtitle_cap.get(cv2.CAP_PROP_POS_FRAMES)
-            current_time = current_frame / self.subtitle_fps
-            progress = (current_frame / self.subtitle_total_frames) * 100
+            fps = self.subtitle_fps if hasattr(self, 'subtitle_fps') else self.subtitle_cap.get(cv2.CAP_PROP_FPS)
+            total_frames = self.subtitle_total_frames if hasattr(self, 'subtitle_total_frames') else int(self.subtitle_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            current_time = current_frame / fps if fps > 0 else 0
 
-            # 使用 FFmpeg 提取当前帧
-            output_path = os.path.join(os.path.dirname(self.video_path_var.get()), 'temp_preview_frame.jpg')
+            # 更新进度条
+            if hasattr(self, 'subtitle_duration') and self.subtitle_duration > 0:
+                progress = (current_time / self.subtitle_duration) * 100
+                self.subtitle_progress_slider.set(progress)
 
-            ffmpeg_cmd = [
-                FFMPEG_PATH,
-                '-y',
-                '-ss', f'{current_time:.3f}',
-                '-i', self.video_path_var.get(),
-                '-vframes', '1',
-                '-q:v', '5',
-                '-preset', 'ultrafast',
-                '-tune', 'fastdecode',
-                output_path
-            ]
+            # 读取当前帧
+            ret, frame = self.subtitle_cap.read()
+            if ret:
+                # 查找当前时间对应的字幕
+                current_subtitle = ""
+                for subtitle in self.subtitles:
+                    if subtitle['start'] <= current_time <= subtitle['end']:
+                        current_subtitle = subtitle['text']
+                        break
 
-            # 执行 FFmpeg 命令 - 修复中文路径编码问题
-            if sys.platform == 'win32':
-                # 将命令列表转换为字符串，确保路径编码正确
-                cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in ffmpeg_cmd)
-                subprocess.run(cmd_str, shell=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            else:
-                subprocess.run(ffmpeg_cmd, capture_output=True)
+                # 应用当前样式设置
+                font_size = self.font_size_var.get()
+                color_name = self.font_color_var.get()
+                color = self.color_mapping.get(color_name, "white")
 
-            # 读取并显示帧
-            if os.path.exists(output_path):
-                frame = cv2.imread(output_path)
-                if frame is not None:
-                    # 查找当前时间对应的字幕
-                    current_subtitle = ""
-                    for subtitle in self.subtitles:
-                        if subtitle['start'] <= current_time <= subtitle['end']:
-                            current_subtitle = subtitle['text']
-                            break
+                # 更新字幕显示（应用样式）
+                self.subtitle_label.config(
+                    text=current_subtitle,
+                    font=("微软雅黑", int(font_size)),
+                    fg=color
+                )
 
-                    # 更新字幕显示
-                    self.subtitle_label.config(text=current_subtitle)
+                # 显示帧
+                self.show_subtitle_frame(frame)
 
-                    # 显示帧
-                    self.show_subtitle_frame(frame)
-
-                # 删除临时文件
-                try:
-                    os.remove(output_path)
-                except:
-                    pass
-
-            # 继续更新，增加延时以降低 CPU 占用
+            # 继续更新
             self.subtitle_timer = self.root.after(50, self.update_subtitle_preview)
 
             # 检查是否播放完毕
-            if current_frame >= self.subtitle_total_frames - 1:
+            if current_frame >= total_frames - 1:
                 self.subtitle_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         except Exception as e:
@@ -4731,28 +4716,39 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         # 计算目标时间
         progress = float(value)
-        target_time = (progress / 100.0) * self.subtitle_duration
+        if hasattr(self, 'subtitle_duration') and self.subtitle_duration > 0:
+            target_time = (progress / 100.0) * self.subtitle_duration
 
-        try:
-            # 更新视频帧位置
-            self.subtitle_cap.set(cv2.CAP_PROP_POS_FRAMES, int(target_time * self.subtitle_fps))
-            ret, frame = self.subtitle_cap.read()
-            if ret:
-                # 查找当前时间对应的字幕
-                current_subtitle = ""
-                for subtitle in self.subtitles:
-                    if subtitle['start'] <= target_time <= subtitle['end']:
-                        current_subtitle = subtitle['text']
-                        break
+            try:
+                # 更新视频帧位置
+                if hasattr(self, 'subtitle_fps') and self.subtitle_fps > 0:
+                    self.subtitle_cap.set(cv2.CAP_PROP_POS_FRAMES, int(target_time * self.subtitle_fps))
+                    ret, frame = self.subtitle_cap.read()
+                    if ret:
+                        # 查找当前时间对应的字幕
+                        current_subtitle = ""
+                        for subtitle in self.subtitles:
+                            if subtitle['start'] <= target_time <= subtitle['end']:
+                                current_subtitle = subtitle['text']
+                                break
 
-                # 更新字幕显示
-                self.subtitle_label.config(text=current_subtitle)
+                        # 应用当前样式设置
+                        font_size = self.font_size_var.get()
+                        color_name = self.font_color_var.get()
+                        color = self.color_mapping.get(color_name, "white")
 
-                # 显示帧
-                self.show_subtitle_frame(frame)
+                        # 更新字幕显示（应用样式）
+                        self.subtitle_label.config(
+                            text=current_subtitle,
+                            font=("微软雅黑", int(font_size)),
+                            fg=color
+                        )
 
-        except Exception as e:
-            print(f"预览更新失败: {str(e)}")
+                        # 显示帧
+                        self.show_subtitle_frame(frame)
+
+            except Exception as e:
+                print(f"预览更新失败: {str(e)}")
 
     def convert_color_to_ass(self, color_name):
         """将颜色名称转换为ASS格式的颜色代码"""
