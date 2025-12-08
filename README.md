@@ -6,6 +6,7 @@
 <img width="400" height="200" alt="image" src="https://github.com/user-attachments/assets/154237fe-8511-435a-888a-77e1b5fa185a" />
 <img width="400" height="200" alt="image" src="https://github.com/user-attachments/assets/2a1a1b67-9143-4979-9663-c9254ee0d561" />
 <img width="400" height="200" alt="image" src="https://github.com/user-attachments/assets/adfefd5e-b87d-460d-947b-bc7f53aa52d1" />
+<img width="400" height="200" alt="image" src="https://github.com/user-attachments/assets/62a90b0b-2994-478e-9c09-9e95db5f6a38" />
 
 
 
@@ -25,14 +26,25 @@
 - 保持原视频质量
 - 实时进度显示
 
-### 3. 字幕视频生成
+### 3. 硬字幕
 - 支持SRT/ASS字幕格式
 - 可自定义字体大小、颜色、位置
 - GPU硬件加速支持（NVIDIA/Intel/AMD）
 - 实时预览字幕效果
 - 自动检测并使用原视频比特率
-- 支持中途保存进度
-
+- 支持进度显示
+  
+### 4. 软字幕
+- 支持SRT/ASS字幕格式
+- 可自定义字体大小、颜色、位置
+- 实时预览字幕效果
+- 支持进度显示
+  
+### 5. 声音处理
+- 基础声音降噪调整
+- 声音放大调整
+- 支持进度显示
+  
 ## 系统要求
 
 - **操作系统**: Windows 10/11, Linux, macOS
@@ -297,6 +309,7 @@ video_cut/
 ---
 
 **注意**: 本工具处理大型视频文件时可能需要较长时间，请耐心等待。建议在处理前确保硬盘有足够的可用空间。
+
 
 
 
