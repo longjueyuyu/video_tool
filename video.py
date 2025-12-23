@@ -540,6 +540,11 @@ class VideoTrimmerPro:
         self.tab_control.add(self.audio_denoise_tab, text="声音处理")
         self.create_audio_denoise_tab()
 
+        # 视频转换标签页
+        self.video_convert_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.video_convert_tab, text="视频转换")
+        self.create_video_convert_tab()
+
         # 在合并标签页中创建视频列表区域
         merge_frame = tk.Frame(self.merge_tab, bg="#333333")
         merge_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -2016,6 +2021,15 @@ class VideoTrimmerPro:
         if file_path:
             self.video_audio_file_var.set(file_path)
 
+    def select_video_for_convert(self):
+        """选择用于转换的视频文件"""
+        file_path = filedialog.askopenfilename(
+            title="选择视频文件",
+            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.flv *.ts *.wmv")]
+        )
+        if file_path:
+            self.video_convert_path_var.set(file_path)
+
     def on_video_audio_file_changed(self, *args):
         """当视频文件路径改变时的回调"""
         video_path = self.video_audio_file_var.get()
@@ -2037,6 +2051,42 @@ class VideoTrimmerPro:
             except Exception as e:
                 self.video_audio_info_label.config(text=f"加载视频失败: {str(e)}")
 
+    def on_video_convert_file_changed(self, *args):
+        """当转换视频文件路径改变时的回调"""
+        video_path = self.video_convert_path_var.get()
+        if video_path and os.path.exists(video_path):
+            try:
+                # 加载视频信息
+                if self.video_convert_cap:
+                    self.video_convert_cap.release()
+                self.video_convert_cap = cv2.VideoCapture(video_path)
+                if self.video_convert_cap.isOpened():
+                    fps = self.video_convert_cap.get(cv2.CAP_PROP_FPS)
+                    total_frames = int(self.video_convert_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    duration = total_frames / fps if fps > 0 else 0
+                    
+                    # 显示视频信息
+                    self.video_convert_info_label.config(
+                        text=f"视频文件: {os.path.basename(video_path)}\n"
+                             f"时长: {duration:.2f}秒\n"
+                             f"帧率: {fps:.2f} fps"
+                    )
+                    
+                    # 获取并显示原始比特率
+                    self.get_video_bitrate_convert(video_path)
+                    
+                    # 自动显示预览
+                    self.show_video_convert_preview_first_frame()
+                    
+                    # 启用进度条
+                    self.video_convert_progress_slider.config(state='normal')
+                    self.video_convert_progress_slider.set(0)
+                else:
+                    self.video_convert_info_label.config(text="无法打开视频文件")
+            except Exception as e:
+                self.video_convert_info_label.config(text=f"加载视频失败: {str(e)}")
+                self.original_bitrate_convert_var.set("获取失败")
+
     def on_noise_reduction_changed(self, *args):
         """降噪强度改变时的回调"""
         value = self.noise_reduction_var.get()
@@ -2046,6 +2096,105 @@ class VideoTrimmerPro:
         """音量放大改变时的回调"""
         value = self.volume_boost_var.get()
         self.volume_value_label.config(text=f"{value:.1f}dB")
+
+    def preview_video_convert(self):
+        """预览转换视频"""
+        video_path = self.video_convert_path_var.get()
+        if not video_path or not os.path.exists(video_path):
+            messagebox.showerror("错误", "请先选择视频文件")
+            return
+
+        try:
+            if not self.video_convert_cap or not self.video_convert_cap.isOpened():
+                self.video_convert_cap = cv2.VideoCapture(video_path)
+
+            ret, frame = self.video_convert_cap.read()
+            if ret:
+                # 显示第一帧
+                self.show_video_convert_frame(frame)
+            else:
+                messagebox.showinfo("提示", "无法读取视频帧")
+        except Exception as e:
+            messagebox.showerror("错误", f"预览失败: {str(e)}")
+
+    def show_video_convert_frame(self, frame):
+        """显示视频转换预览帧"""
+        try:
+            # 获取画布尺寸
+            canvas_width = self.video_convert_preview_canvas.winfo_width()
+            canvas_height = self.video_convert_preview_canvas.winfo_height()
+
+            if canvas_width <= 1 or canvas_height <= 1:
+                canvas_width = 800
+                canvas_height = 600
+
+            # 调整帧大小以适应画布
+            frame_height, frame_width = frame.shape[:2]
+            scale = min(canvas_width / frame_width, canvas_height / frame_height)
+            new_width = int(frame_width * scale)
+            new_height = int(frame_height * scale)
+
+            if new_width > 0 and new_height > 0:
+                resized_frame = cv2.resize(frame, (new_width, new_height))
+                rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+
+                from PIL import Image, ImageTk
+                pil_image = Image.fromarray(rgb_frame)
+                photo = ImageTk.PhotoImage(image=pil_image)
+
+                self.video_convert_preview_canvas.delete("all")
+                self.video_convert_preview_canvas.create_image(
+                    canvas_width // 2, canvas_height // 2,
+                    image=photo, anchor=tk.CENTER
+                )
+                self.video_convert_preview_canvas.image = photo
+        except Exception as e:
+            print(f"显示视频帧失败: {str(e)}")
+
+    def show_video_convert_preview_first_frame(self):
+        """显示视频预览第一帧"""
+        video_path = self.video_convert_path_var.get()
+        if not video_path or not os.path.exists(video_path):
+            return
+        
+        try:
+            # 临时创建一个VideoCapture对象来获取第一帧
+            temp_cap = cv2.VideoCapture(video_path)
+            if temp_cap.isOpened():
+                ret, frame = temp_cap.read()
+                if ret:
+                    self.show_video_convert_frame(frame)
+                temp_cap.release()
+        except Exception as e:
+            print(f"预览视频第一帧失败: {str(e)}")
+
+    def on_video_convert_progress_change(self, value):
+        """处理视频转换进度条拖动"""
+        if not self.video_convert_cap:
+            return
+        
+        # 计算目标时间
+        progress = float(value)
+        video_path = self.video_convert_path_var.get()
+        if not video_path or not os.path.exists(video_path):
+            return
+        
+        # 获取视频时长
+        fps = self.video_convert_cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(self.video_convert_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / fps if fps > 0 else 0
+        
+        if duration > 0:
+            target_time = (progress / 100.0) * duration
+            try:
+                # 更新视频帧位置
+                self.video_convert_cap.set(cv2.CAP_PROP_POS_FRAMES, int(target_time * fps))
+                ret, frame = self.video_convert_cap.read()
+                if ret:
+                    # 显示帧
+                    self.show_video_convert_frame(frame)
+            except Exception as e:
+                print(f"预览更新失败: {str(e)}")
 
     def preview_video_audio(self):
         """预览视频"""
@@ -2191,12 +2340,450 @@ class VideoTrimmerPro:
             self.video_audio_denoise_btn.config(state='normal')
             self.video_audio_stop_btn.config(state='disabled')
 
+    def start_video_convert(self):
+        """开始视频转换"""
+        video_path = self.video_convert_path_var.get()
+        if not video_path or not os.path.exists(video_path):
+            messagebox.showerror("错误", "请先选择视频文件")
+            return
+
+        if self.is_video_convert_processing:
+            messagebox.showinfo("提示", "正在转换中，请等待...")
+            return
+
+        # 选择保存路径
+        video_dir = os.path.dirname(video_path)
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        default_filename = f"{video_name}-converted.mp4"
+        default_path = os.path.join(video_dir, default_filename)
+
+        save_path = filedialog.asksaveasfilename(
+            title="选择保存位置",
+            initialfile=default_path,
+            defaultextension=".mp4",
+            filetypes=[("MP4文件", "*.mp4"), ("所有文件", "*.*")]
+        )
+
+        if not save_path:
+            return
+
+        try:
+            # 获取新比特率
+            new_bitrate = self.new_bitrate_var.get()
+            if not new_bitrate:
+                # 如果用户没有输入新比特率，使用原视频比特率
+                original_bitrate_text = self.original_bitrate_convert_var.get()
+                if original_bitrate_text and original_bitrate_text != "未选择视频" and original_bitrate_text != "未知" and original_bitrate_text != "获取失败":
+                    new_bitrate = original_bitrate_text.replace('k', '')
+                else:
+                    new_bitrate = "3000"  # 默认值
+
+            # 构建FFmpeg命令
+            video_path_clean = os.path.abspath(video_path)
+
+            # 根据用户选择设置编码器参数
+            gpu_option = self.video_convert_gpu_var.get()
+            encoder = self.video_convert_gpu_mapping.get(gpu_option, "")
+            
+            # 构建FFmpeg命令 - 转换为MP4并设置新比特率
+            ffmpeg_cmd = [
+                FFMPEG_PATH,
+                '-y',  # 覆盖已存在的文件
+                '-i', video_path_clean,  # 输入文件
+            ]
+            
+            # 根据选择的GPU加速类型设置编码器参数
+            if encoder:
+                if encoder == "h264_nvenc_fast":
+                    # NVIDIA高性能模式
+                    ffmpeg_cmd.extend([
+                        '-c:v', 'h264_nvenc',
+                        '-preset', 'p0',  # 最高性能模式
+                        '-tune', 'llhq',   # 低延迟高质量
+                        '-b:v', f'{new_bitrate}k',  # 使用用户指定的比特率
+                        '-c:a', 'aac',
+                        '-b:a', '128k',
+                        '-movflags', '+faststart',
+                        '-f', 'mp4',
+                        save_path
+                    ])
+                elif encoder == "h264_nvenc":
+                    # NVIDIA标准模式
+                    ffmpeg_cmd.extend([
+                        '-c:v', encoder,
+                        '-preset', 'p4',  # 平衡性能和质量
+                        '-tune', 'hq',    # 高质量
+                        '-b:v', f'{new_bitrate}k',  # 使用用户指定的比特率
+                        '-c:a', 'aac',
+                        '-b:a', '128k',
+                        '-movflags', '+faststart',
+                        '-f', 'mp4',
+                        save_path
+                    ])
+                elif encoder == "hevc_qsv":
+                    # Intel QSV编码器
+                    ffmpeg_cmd.extend([
+                        '-c:v', encoder,
+                        '-preset', 'faster',
+                        '-b:v', f'{new_bitrate}k',
+                        '-c:a', 'aac',
+                        '-b:a', '128k',
+                        '-movflags', '+faststart',
+                        '-f', 'mp4',
+                        save_path
+                    ])
+                elif encoder == "av1_amf":
+                    # AMD AMF编码器
+                    ffmpeg_cmd.extend([
+                        '-c:v', encoder,
+                        '-quality', 'balanced',
+                        '-b:v', f'{new_bitrate}k',
+                        '-c:a', 'aac',
+                        '-b:a', '128k',
+                        '-movflags', '+faststart',
+                        '-f', 'mp4',
+                        save_path
+                    ])
+                elif encoder == "h264_vaapi":
+                    # VAAPI编码器
+                    ffmpeg_cmd.extend([
+                        '-c:v', encoder,
+                        '-b:v', f'{new_bitrate}k',
+                        '-c:a', 'aac',
+                        '-b:a', '128k',
+                        '-movflags', '+faststart',
+                        '-f', 'mp4',
+                        save_path
+                    ])
+                else:
+                    # 其他编码器
+                    ffmpeg_cmd.extend([
+                        '-c:v', encoder,
+                        '-b:v', f'{new_bitrate}k',
+                        '-c:a', 'aac',
+                        '-b:a', '128k',
+                        '-movflags', '+faststart',
+                        '-f', 'mp4',
+                        save_path
+                    ])
+            else:
+                # 默认使用软件编码
+                ffmpeg_cmd.extend([
+                    '-c:v', 'libx264',  # 视频编码器
+                    '-preset', 'medium',  # 平衡速度和质量
+                    '-b:v', f'{new_bitrate}k',  # 设置视频比特率
+                    '-c:a', 'aac',  # 音频编码器
+                    '-b:a', '128k',  # 音频比特率
+                    '-movflags', '+faststart',  # 优化MP4文件以支持流式播放
+                    '-f', 'mp4',  # 输出格式
+                    save_path  # 输出文件
+                ])
+
+
+            print("FFmpeg转换命令:", " ".join(ffmpeg_cmd))
+
+            # 开始转换
+            self.is_video_convert_processing = True
+            self.video_convert_progress_var.set(0)
+            self.video_convert_btn.config(state='disabled')
+            self.video_convert_status_label.config(text="正在转换...")
+
+            # 启动处理线程
+            process_thread = threading.Thread(
+                target=self.run_video_convert,
+                args=(ffmpeg_cmd, save_path)
+            )
+            process_thread.start()
+
+        except Exception as e:
+            print(f"错误：转换失败 - {str(e)}")
+            self.is_video_convert_processing = False
+            messagebox.showerror("错误", f"转换失败: {str(e)}")
+            self.video_convert_btn.config(state='normal')
+            self.video_convert_status_label.config(text="转换失败")
+
     def stop_video_audio_denoise(self):
         """停止声音处理"""
         self.is_video_audio_processing = False
         self.video_audio_status_label.config(text="已停止")
         self.video_audio_denoise_btn.config(state='normal')
         self.video_audio_stop_btn.config(state='disabled')
+
+    def run_video_convert(self, cmd, output_path):
+        """执行视频转换"""
+        process = None
+        final_returncode = -1
+        try:
+            print("\n=== 开始执行视频转换FFmpeg命令 ===")
+            print("1. 检查FFmpeg路径...")
+            if not os.path.exists(FFMPEG_PATH):
+                raise Exception(f"FFmpeg不存在: {FFMPEG_PATH}")
+            print(f"FFmpeg路径: {FFMPEG_PATH}")
+
+            print("2. 检查输入文件...")
+            video_path = self.video_convert_path_var.get()
+            if not os.path.exists(video_path):
+                raise Exception(f"输入视频不存在: {video_path}")
+            print(f"输入视频: {video_path}")
+
+            # 获取视频时长用于进度计算
+            video_duration = 0
+            try:
+                info_cmd = [FFMPEG_PATH, '-i', video_path]
+                if sys.platform == 'win32':
+                    cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in info_cmd)
+                    info_result = subprocess.run(
+                        cmd_str,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                else:
+                    info_result = subprocess.run(
+                        info_cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8'
+                    )
+
+                for line in info_result.stderr.split('\n'):
+                    if 'Duration:' in line:
+                        duration = line.split('Duration: ')[1].split(',')[0].strip()
+                        h, m, s = map(float, duration.split(':'))
+                        video_duration = h * 3600 + m * 60 + s
+                        break
+            except Exception as e:
+                print(f"获取视频时长失败: {e}，将无法显示准确进度")
+
+            print(f"视频时长: {video_duration:.2f}秒")
+
+            print("3. 执行FFmpeg命令...")
+            print("命令:", " ".join(cmd))
+
+            # 使用subprocess.Popen执行命令
+            if sys.platform == 'win32':
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    preexec_fn=os.setsid
+                )
+
+            # 将进程添加到跟踪列表
+            self.active_processes.append(process)
+            print(f"[DEBUG] 启动视频转换进程 PID: {process.pid}")
+
+            # 实时读取输出并更新进度
+            import time
+            last_progress = 0
+            last_file_size = 0
+            file_size_stable_count = 0
+            last_output_time = time.time()
+
+            while True:
+                # 检查进程是否已退出
+                if process.poll() is not None:
+                    print("[DEBUG] 视频转换FFmpeg进程已退出")
+                    break
+
+                # 检查是否应该停止处理
+                if not self.is_video_convert_processing:
+                    print("[DEBUG] 收到停止信号，终止视频转换进程...")
+                    process.terminate()
+                    break
+
+                try:
+                    # 读取一行输出（非阻塞）
+                    import select
+                    if sys.platform != 'win32':
+                        ready, _, _ = select.select([process.stderr], [], [], 0.1)
+                        if ready:
+                            line = process.stderr.readline()
+                        else:
+                            line = None
+                    else:
+                        line = process.stderr.readline()
+
+                    if line:
+                        line = line.strip()
+                        print(line)
+                        last_output_time = time.time()
+
+                        # 解析进度信息
+                        if 'time=' in line:
+                            try:
+                                time_str = line.split('time=')[1].split(' ')[0].strip()
+                                h, m, s = map(float, time_str.split(':'))
+                                current_time = h * 3600 + m * 60 + s
+
+                                # 计算进度百分比
+                                if video_duration > 0:
+                                    progress = (current_time / video_duration) * 100
+                                    progress = min(progress, 98)
+
+                                    if progress > last_progress:
+                                        last_progress = progress
+                                        self.root.after(0, lambda p=progress: self.video_convert_progress_var.set(p))
+                                        self.root.after(0, lambda p=progress: self.video_convert_status_label.config(text=f"转换中... {p:.1f}%"))
+                                        print(f"进度: {progress:.1f}% ({current_time:.1f}s / {video_duration:.1f}s)")
+                            except Exception as e:
+                                print(f"进度解析错误: {e}")
+                except Exception as e:
+                    if "readline" not in str(e).lower():
+                        print(f"读取输出错误: {e}")
+
+                # 监控输出文件大小变化
+                if os.path.exists(output_path):
+                    try:
+                        current_file_size = os.path.getsize(output_path)
+                        if current_file_size > last_file_size:
+                            last_file_size = current_file_size
+                            file_size_stable_count = 0
+                        elif current_file_size == last_file_size and current_file_size > 0:
+                            file_size_stable_count += 1
+                        else:
+                            file_size_stable_count = 0
+
+                        if file_size_stable_count > 50:
+                            print(f"[DEBUG] 文件大小已稳定 {file_size_stable_count * 0.1:.1f}秒")
+                    except:
+                        pass
+
+                # 检查长时间无输出
+                elapsed_since_output = time.time() - last_output_time
+                if elapsed_since_output > 30:
+                    if process.poll() is None:
+                        print(f"[DEBUG] 超过30秒无输出，但进程仍在运行")
+                        if os.path.exists(output_path):
+                            file_size = os.path.getsize(output_path)
+                            if file_size > 0 and last_progress < 95:
+                                self.root.after(0, lambda: self.video_convert_progress_var.set(95))
+                                self.root.after(0, lambda: self.video_convert_status_label.config(text="转换中... 95%"))
+                                print(f"[DEBUG] 设置进度为95%")
+
+                time.sleep(0.1)
+
+            # 获取最终返回码
+            returncode = process.poll()
+            if returncode is None:
+                try:
+                    returncode = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    returncode = process.returncode if process.returncode is not None else -1
+
+            # 读取剩余输出
+            try:
+                if process.stdin and not process.stdin.closed:
+                    process.stdin.close()
+                stdout, stderr = process.communicate(timeout=2)
+            except:
+                stdout, stderr = "", ""
+
+            final_returncode = returncode
+
+            print("4. 检查执行结果...")
+            print(f"返回码: {final_returncode}")
+
+            # 处理结果
+            if final_returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                print("视频转换完成！")
+                self.root.after(0, lambda: self.video_convert_progress_var.set(100))
+                self.root.after(0, lambda: self.video_convert_status_label.config(text="转换完成"))
+                self.root.after(0, lambda: messagebox.showinfo("成功", f"转换完成:\n{output_path}"))
+            else:
+                error_msg = f"转换失败（返回码: {final_returncode}）"
+                if stderr:
+                    error_msg += f"\n{stderr[-500:]}"
+                print(error_msg)
+                self.root.after(0, lambda msg=error_msg: messagebox.showerror("错误", msg))
+                self.root.after(0, lambda: self.video_convert_progress_var.set(0))
+                self.root.after(0, lambda: self.video_convert_status_label.config(text="转换失败"))
+
+        except Exception as e:
+            error_msg = f"执行失败: {str(e)}"
+            print(error_msg)
+            logger.error(error_msg)
+            self.root.after(0, lambda msg=error_msg: messagebox.showerror("错误", msg))
+            self.root.after(0, lambda: self.video_convert_progress_var.set(0))
+            self.root.after(0, lambda: self.video_convert_status_label.config(text="转换失败"))
+        finally:
+            print("5. 清理状态和进程资源...")
+
+            # 清理进程资源
+            if process is not None:
+                try:
+                    process_pid = process.pid if hasattr(process, 'pid') else 'unknown'
+                    print(f"[DEBUG] 开始清理视频转换进程 PID: {process_pid}")
+
+                    # 关闭所有管道
+                    for pipe_name in ['stdin', 'stdout', 'stderr']:
+                        pipe = getattr(process, pipe_name, None)
+                        if pipe and not pipe.closed:
+                            try:
+                                pipe.close()
+                                print(f"[DEBUG] 已关闭 {pipe_name} 管道")
+                            except Exception as e:
+                                print(f"[DEBUG] 关闭 {pipe_name} 管道时出错: {e}")
+
+                    # 确保进程已完全结束
+                    if process.poll() is None:
+                        print(f"[DEBUG] 视频转换进程 {process_pid} 仍在运行，尝试终止...")
+                        try:
+                            process.terminate()
+                            try:
+                                process.wait(timeout=2)
+                                print(f"[DEBUG] 进程 {process_pid} 已通过terminate结束")
+                            except subprocess.TimeoutExpired:
+                                print(f"[DEBUG] 进程 {process_pid} terminate后仍运行，强制kill")
+                                try:
+                                    process.kill()
+                                    process.wait(timeout=1)
+                                    print(f"[DEBUG] 进程 {process_pid} 已通过kill结束")
+                                except:
+                                    print(f"[DEBUG] 警告：进程 {process_pid} kill后仍可能运行")
+                        except Exception as e:
+                            print(f"[DEBUG] 终止进程时出错: {e}")
+
+                    # 从活跃进程列表中移除
+                    if process in self.active_processes:
+                        self.active_processes.remove(process)
+                        print(f"[DEBUG] 从活跃进程列表中移除视频转换进程 PID: {process_pid}")
+
+                    print(f"[DEBUG] 视频转换进程 {process_pid} 清理完成")
+                except Exception as e:
+                    print(f"[DEBUG] 清理视频转换进程时出错: {e}")
+
+            # 更新状态标志
+            self.is_video_convert_processing = False
+
+            # 重新启用按钮
+            self.root.after(0, lambda: self.video_convert_btn.config(state='normal'))
+            self.root.after(0, lambda: self.video_convert_preview_btn.config(state='normal'))
+
+            # 根据最终返回码处理进度条
+            final_rc = final_returncode if 'final_returncode' in locals() else (process.returncode if process and process.returncode is not None else -1)
+            if final_rc != 0:
+                self.root.after(0, lambda: self.video_convert_progress_var.set(0))
+                print(f"[DEBUG] 处理失败（返回码: {final_rc}），重置进度条")
+
+            print("=== 视频转换FFmpeg命令执行完成 ===\n")
 
     def run_video_audio_denoise(self, cmd, output_path):
         """执行声音处理"""
@@ -2859,6 +3446,60 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         except Exception as e:
             print(f"获取视频比特率失败: {str(e)}")
             self.original_bitrate_var.set("获取失败")
+
+    def get_video_bitrate_convert(self, video_path):
+        """使用ffprobe获取转换视频的比特率"""
+        try:
+            # 使用ffprobe获取视频比特率 - 修复中文路径编码问题
+            ffprobe_cmd = [
+                find_ffprobe_path(),
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=bit_rate',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                video_path
+            ]
+
+            if sys.platform == 'win32':
+                # 将命令列表转换为字符串，确保路径编码正确
+                cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in ffprobe_cmd)
+                result = subprocess.run(
+                    cmd_str,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                result = subprocess.run(
+                    ffprobe_cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8'
+                )
+
+            if result.returncode == 0 and result.stdout.strip():
+                # 获取比特率（单位：bps），转换为kbps
+                bitrate_bps = int(result.stdout.strip())
+                bitrate_kbps = bitrate_bps / 1000
+
+                # 更新显示
+                self.original_bitrate_convert_var.set(f"{bitrate_kbps:.0f}k")
+
+                # 如果用户没有输入新比特率，则设置为原视频比特率
+                if not self.new_bitrate_var.get():
+                    self.new_bitrate_var.set(f"{bitrate_kbps:.0f}")
+
+                print(f"原视频比特率: {bitrate_kbps:.0f}k")
+            else:
+                # 如果无法获取比特率，显示未知
+                self.original_bitrate_convert_var.set("未知")
+                print("无法获取视频比特率")
+
+        except Exception as e:
+            print(f"获取视频比特率失败: {str(e)}")
+            self.original_bitrate_convert_var.set("获取失败")
 
     def _parse_ass_subtitles(self, content, video_duration):
         """解析ASS/SSA格式字幕"""
@@ -5460,6 +6101,125 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         # 状态标签
         self.video_audio_status_label = tk.Label(main_frame, text="", bg="#333333", fg="white")
         self.video_audio_status_label.pack(pady=(5, 0))
+
+    def create_video_convert_tab(self):
+        """创建视频转换标签页界面"""
+        # 主框架
+        main_frame = tk.Frame(self.video_convert_tab, bg="#333333")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # 配置主框架的网格权重
+        main_frame.grid_rowconfigure(1, weight=1)  # 预览区域可扩展
+        main_frame.grid_rowconfigure(3, weight=0)  # 控制区域固定大小
+
+        # 文件选择区域
+        file_frame = tk.Frame(main_frame, bg="#333333")
+        file_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(file_frame, text="视频文件：").pack(side=tk.LEFT, padx=(0, 5))
+        self.video_convert_path_var = tk.StringVar()
+        ttk.Entry(file_frame, textvariable=self.video_convert_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(file_frame, text="选择视频", command=self.select_video_for_convert).pack(side=tk.LEFT, padx=(0, 10))
+
+        # 拖放支持
+        self.video_convert_path_var.trace('w', self.on_video_convert_file_changed)
+
+        # 预览区域
+        preview_frame = tk.Frame(main_frame, bg="#1e1e1e")
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        # 视频预览画布
+        self.video_convert_preview_canvas = tk.Canvas(preview_frame, bg="#1e1e1e", bd=0, highlightthickness=0)
+        self.video_convert_preview_canvas.pack(fill=tk.BOTH, expand=True)
+
+        # 视频信息显示
+        self.video_convert_info_label = tk.Label(preview_frame, text="请选择视频文件",
+                                                bg="#1e1e1e", fg="white", font=("Arial", 12))
+        self.video_convert_info_label.pack(pady=20)
+
+        # 进度条拖动区域 - 在预览区域和控制区域之间
+        progress_slider_frame = tk.Frame(main_frame, bg="#333333")
+        progress_slider_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # 播放进度条（可拖动）
+        self.video_convert_progress_slider = ttk.Scale(
+            progress_slider_frame,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            command=self.on_video_convert_progress_change
+        )
+        self.video_convert_progress_slider.pack(fill=tk.X, padx=5)
+        self.video_convert_progress_slider.config(state='disabled')  # 初始禁用，直到加载视频
+
+        # 控制区域
+        control_frame = tk.Frame(main_frame, bg="#333333")
+        control_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # 原视频比特率显示
+        bitrate_frame = tk.Frame(control_frame, bg="#333333")
+        bitrate_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(bitrate_frame, text="原视频比特率：").pack(side=tk.LEFT, padx=(0, 5))
+        self.original_bitrate_convert_var = tk.StringVar(value="未选择视频")
+        self.original_bitrate_convert_label = ttk.Label(bitrate_frame, textvariable=self.original_bitrate_convert_var, foreground="white")
+        self.original_bitrate_convert_label.pack(side=tk.LEFT, padx=(0, 20))
+
+        # 新比特率输入
+        ttk.Label(bitrate_frame, text="新比特率：").pack(side=tk.LEFT, padx=(0, 5))
+        self.new_bitrate_var = tk.StringVar()
+        self.new_bitrate_entry = ttk.Entry(bitrate_frame, textvariable=self.new_bitrate_var, width=10)
+        self.new_bitrate_entry.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(bitrate_frame, text="k").pack(side=tk.LEFT, padx=(0, 20))
+
+        # GPU加速选择
+        ttk.Label(bitrate_frame, text="GPU加速：").pack(side=tk.LEFT, padx=(0, 5))
+        self.video_convert_gpu_var = tk.StringVar(value="无GPU")
+        gpu_options = [
+            {"label": "无GPU", "value": ""},
+            {"label": "NVIDIA显卡", "value": "h264_nvenc"},
+            {"label": "NVIDIA高性能", "value": "h264_nvenc_fast"},
+            {"label": "Intel集成显卡", "value": "hevc_qsv"},
+            {"label": "AMD 显卡", "value": "av1_amf"},
+            {"label": "VAAPI", "value": "h264_vaapi"}
+        ]
+        gpu_combo = ttk.Combobox(
+            bitrate_frame,
+            textvariable=self.video_convert_gpu_var,
+            values=[opt["label"] for opt in gpu_options],
+            state="readonly",
+            width=10
+        )
+        gpu_combo.pack(side=tk.LEFT, padx=(0, 15))
+
+        # 保存GPU选项映射
+        self.video_convert_gpu_mapping = {opt["label"]: opt["value"] for opt in gpu_options}
+
+        # 按钮区域
+        button_frame = tk.Frame(control_frame, bg="#333333")
+        button_frame.pack(fill=tk.X)
+
+        # 预览按钮
+        self.video_convert_preview_btn = ttk.Button(button_frame, text="预览视频", command=self.preview_video_convert)
+        self.video_convert_preview_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 开始转换按钮
+        self.video_convert_btn = ttk.Button(button_frame, text="开始转换", command=self.start_video_convert)
+        self.video_convert_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 进度条
+        self.video_convert_progress_var = tk.DoubleVar()
+        self.video_convert_progress_bar = ttk.Progressbar(main_frame, variable=self.video_convert_progress_var, maximum=100)
+        self.video_convert_progress_bar.pack(fill=tk.X, pady=(10, 0))
+
+        # 状态标签
+        self.video_convert_status_label = tk.Label(main_frame, text="", bg="#333333", fg="white")
+        self.video_convert_status_label.pack(pady=(5, 0))
+
+        # 初始化视频预览变量
+        self.video_convert_cap = None
+        self.is_video_convert_processing = False
+        self.video_convert_process = None
 
     def __del__(self):
         """清理资源"""
