@@ -384,7 +384,7 @@ class VideoTrimmerPro:
         # 原视频比特率显示
         ttk.Label(style_frame, text="原视频比特率：").pack(side=tk.LEFT)
         self.original_bitrate_var = tk.StringVar(value="未选择视频")
-        self.original_bitrate_label = ttk.Label(style_frame, textvariable=self.original_bitrate_var, foreground="white")
+        self.original_bitrate_label = tk.Label(style_frame, textvariable=self.original_bitrate_var, foreground="white", bg="#2d4a5e", relief=tk.RAISED, padx=5, pady=2)
         self.original_bitrate_label.pack(side=tk.LEFT, padx=(0, 15))
 
         # 字体大小
@@ -6162,7 +6162,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         ttk.Label(bitrate_frame, text="原视频比特率：").pack(side=tk.LEFT, padx=(0, 5))
         self.original_bitrate_convert_var = tk.StringVar(value="未选择视频")
-        self.original_bitrate_convert_label = ttk.Label(bitrate_frame, textvariable=self.original_bitrate_convert_var, foreground="white")
+        self.original_bitrate_convert_label = tk.Label(bitrate_frame, textvariable=self.original_bitrate_convert_var, foreground="white", bg="#2d4a5e", relief=tk.RAISED, padx=5, pady=2)
         self.original_bitrate_convert_label.pack(side=tk.LEFT, padx=(0, 20))
 
         # 新比特率输入
