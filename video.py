@@ -291,6 +291,11 @@ class VideoTrimmerPro:
             'output_format': '自动'    # 输出格式（自动选择）
         }
 
+        # 音频提取相关变量
+        self.audio_extract_cap = None  # 视频预览
+        self.is_audio_extract_processing = False  # 音频提取处理状态
+        self.audio_extract_process = None  # 音频提取进程
+
         # 进程管理
         self.active_processes = []  # 跟踪所有活跃的FFmpeg进程
 
@@ -544,6 +549,11 @@ class VideoTrimmerPro:
         self.video_convert_tab = ttk.Frame(self.tab_control)
         self.tab_control.add(self.video_convert_tab, text="视频转换")
         self.create_video_convert_tab()
+
+        # 音频提取标签页
+        self.audio_extract_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.audio_extract_tab, text="音频提取")
+        self.create_audio_extract_tab()
 
         # 在合并标签页中创建视频列表区域
         merge_frame = tk.Frame(self.merge_tab, bg="#333333")
@@ -2030,6 +2040,15 @@ class VideoTrimmerPro:
         if file_path:
             self.video_convert_path_var.set(file_path)
 
+    def select_video_for_audio_extract(self):
+        """选择要提取音频的视频文件"""
+        file_path = filedialog.askopenfilename(
+            title="选择视频文件",
+            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.flv *.ts *.wmv")]
+        )
+        if file_path:
+            self.audio_extract_path_var.set(file_path)
+
     def on_video_audio_file_changed(self, *args):
         """当视频文件路径改变时的回调"""
         video_path = self.video_audio_file_var.get()
@@ -2086,6 +2105,120 @@ class VideoTrimmerPro:
             except Exception as e:
                 self.video_convert_info_label.config(text=f"加载视频失败: {str(e)}")
                 self.original_bitrate_convert_var.set("获取失败")
+
+    def on_audio_extract_file_changed(self, *args):
+        """当音频提取视频文件路径改变时的回调"""
+        video_path = self.audio_extract_path_var.get()
+        if video_path and os.path.exists(video_path):
+            try:
+                # 加载视频信息（用于预览）
+                if self.audio_extract_cap:
+                    self.audio_extract_cap.release()
+                self.audio_extract_cap = cv2.VideoCapture(video_path)
+                
+                # 获取音频信息
+                audio_info = self.get_audio_info(video_path)
+                
+                if self.audio_extract_cap.isOpened():
+                    fps = self.audio_extract_cap.get(cv2.CAP_PROP_FPS)
+                    total_frames = int(self.audio_extract_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    duration = total_frames / fps if fps > 0 else 0
+                    
+                    # 显示音频信息
+                    info_text = f"视频文件: {os.path.basename(video_path)}\n"
+                    info_text += f"时长: {duration:.2f}秒\n"
+                    if audio_info:
+                        if 'sample_rate' in audio_info:
+                            info_text += f"采样率: {audio_info['sample_rate']} Hz\n"
+                        if 'channels' in audio_info:
+                            channels = audio_info['channels']
+                            channel_text = "单声道" if channels == 1 else f"{channels}声道" if channels == 2 else f"{channels}声道"
+                            info_text += f"声道: {channel_text}\n"
+                        if 'audio_bitrate' in audio_info:
+                            bitrate_kbps = audio_info['audio_bitrate'] / 1000
+                            info_text += f"音频比特率: {bitrate_kbps:.0f}k"
+                    else:
+                        info_text += "音频信息: 未知"
+                    
+                    self.audio_extract_info_label.config(text=info_text)
+                    
+                    # 自动显示预览
+                    self.show_audio_extract_preview_first_frame()
+                    
+                    # 启用进度条
+                    self.audio_extract_progress_slider.config(state='normal')
+                    self.audio_extract_progress_slider.set(0)
+                else:
+                    self.audio_extract_info_label.config(text="无法打开视频文件")
+            except Exception as e:
+                self.audio_extract_info_label.config(text=f"加载视频失败: {str(e)}")
+
+    def get_audio_info(self, video_path):
+        """获取视频中的音频信息"""
+        try:
+            FFPROBE_PATH = find_ffprobe_path()
+            if not FFPROBE_PATH or not os.path.exists(FFPROBE_PATH):
+                return None
+            
+            # 使用ffprobe获取音频信息
+            info_cmd = [FFPROBE_PATH, '-i', video_path]
+            if sys.platform == 'win32':
+                cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in info_cmd)
+                info_result = subprocess.run(
+                    cmd_str,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                info_result = subprocess.run(
+                    info_cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8'
+                )
+            
+            audio_info = {}
+            for line in info_result.stderr.split('\n'):
+                if 'Stream' in line and 'Audio:' in line:
+                    # 解析采样率
+                    if 'Hz' in line:
+                        try:
+                            sample_rate_str = line.split('Hz')[0].split(',')[-1].strip()
+                            audio_info['sample_rate'] = int(sample_rate_str)
+                        except:
+                            pass
+                    # 解析声道数
+                    if 'stereo' in line.lower() or 'mono' in line.lower():
+                        if 'stereo' in line.lower():
+                            audio_info['channels'] = 2
+                        elif 'mono' in line.lower():
+                            audio_info['channels'] = 1
+                    elif 'channels' in line.lower():
+                        try:
+                            # 尝试从 "2 channels" 这样的格式提取
+                            parts = line.split(',')
+                            for part in parts:
+                                if 'channel' in part.lower():
+                                    channel_str = part.strip().split()[0]
+                                    audio_info['channels'] = int(channel_str)
+                                    break
+                        except:
+                            pass
+                    # 解析音频比特率
+                    if 'kb/s' in line:
+                        try:
+                            bitrate_str = line.split('kb/s')[0].split(',')[-1].strip()
+                            audio_info['audio_bitrate'] = float(bitrate_str) * 1000  # 转换为b/s
+                        except:
+                            pass
+            
+            return audio_info if audio_info else None
+        except Exception as e:
+            print(f"获取音频信息失败: {str(e)}")
+            return None
 
     def on_noise_reduction_changed(self, *args):
         """降噪强度改变时的回调"""
@@ -2193,6 +2326,105 @@ class VideoTrimmerPro:
                 if ret:
                     # 显示帧
                     self.show_video_convert_frame(frame)
+            except Exception as e:
+                print(f"预览更新失败: {str(e)}")
+
+    def preview_audio_extract(self):
+        """预览音频提取视频"""
+        video_path = self.audio_extract_path_var.get()
+        if not video_path or not os.path.exists(video_path):
+            messagebox.showerror("错误", "请先选择视频文件")
+            return
+
+        try:
+            if not self.audio_extract_cap or not self.audio_extract_cap.isOpened():
+                self.audio_extract_cap = cv2.VideoCapture(video_path)
+
+            ret, frame = self.audio_extract_cap.read()
+            if ret:
+                # 显示第一帧
+                self.show_audio_extract_frame(frame)
+            else:
+                messagebox.showinfo("提示", "无法读取视频帧")
+        except Exception as e:
+            messagebox.showerror("错误", f"预览失败: {str(e)}")
+
+    def show_audio_extract_frame(self, frame):
+        """显示音频提取预览帧"""
+        try:
+            # 获取画布尺寸
+            canvas_width = self.audio_extract_preview_canvas.winfo_width()
+            canvas_height = self.audio_extract_preview_canvas.winfo_height()
+
+            if canvas_width <= 1 or canvas_height <= 1:
+                canvas_width = 800
+                canvas_height = 600
+
+            # 调整帧大小以适应画布
+            frame_height, frame_width = frame.shape[:2]
+            scale = min(canvas_width / frame_width, canvas_height / frame_height)
+            new_width = int(frame_width * scale)
+            new_height = int(frame_height * scale)
+
+            if new_width > 0 and new_height > 0:
+                resized_frame = cv2.resize(frame, (new_width, new_height))
+                rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+
+                from PIL import Image, ImageTk
+                pil_image = Image.fromarray(rgb_frame)
+                photo = ImageTk.PhotoImage(image=pil_image)
+
+                self.audio_extract_preview_canvas.delete("all")
+                self.audio_extract_preview_canvas.create_image(
+                    canvas_width // 2, canvas_height // 2,
+                    image=photo, anchor=tk.CENTER
+                )
+                self.audio_extract_preview_canvas.image = photo
+        except Exception as e:
+            print(f"显示视频帧失败: {str(e)}")
+
+    def show_audio_extract_preview_first_frame(self):
+        """显示音频提取视频预览第一帧"""
+        video_path = self.audio_extract_path_var.get()
+        if not video_path or not os.path.exists(video_path):
+            return
+        
+        try:
+            # 临时创建一个VideoCapture对象来获取第一帧
+            temp_cap = cv2.VideoCapture(video_path)
+            if temp_cap.isOpened():
+                ret, frame = temp_cap.read()
+                if ret:
+                    self.show_audio_extract_frame(frame)
+                temp_cap.release()
+        except Exception as e:
+            print(f"预览视频第一帧失败: {str(e)}")
+
+    def on_audio_extract_progress_change(self, value):
+        """处理音频提取进度条拖动"""
+        if not self.audio_extract_cap:
+            return
+        
+        # 计算目标时间
+        progress = float(value)
+        video_path = self.audio_extract_path_var.get()
+        if not video_path or not os.path.exists(video_path):
+            return
+        
+        # 获取视频时长
+        fps = self.audio_extract_cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(self.audio_extract_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / fps if fps > 0 else 0
+        
+        if duration > 0:
+            target_time = (progress / 100.0) * duration
+            try:
+                # 更新视频帧位置
+                self.audio_extract_cap.set(cv2.CAP_PROP_POS_FRAMES, int(target_time * fps))
+                ret, frame = self.audio_extract_cap.read()
+                if ret:
+                    # 显示帧
+                    self.show_audio_extract_frame(frame)
             except Exception as e:
                 print(f"预览更新失败: {str(e)}")
 
@@ -2339,6 +2571,409 @@ class VideoTrimmerPro:
             messagebox.showerror("错误", f"处理失败: {str(e)}")
             self.video_audio_denoise_btn.config(state='normal')
             self.video_audio_stop_btn.config(state='disabled')
+
+    def start_audio_extract(self):
+        """开始提取音频"""
+        video_path = self.audio_extract_path_var.get()
+        if not video_path or not os.path.exists(video_path):
+            messagebox.showerror("错误", "请先选择视频文件")
+            return
+
+        if self.is_audio_extract_processing:
+            messagebox.showinfo("提示", "正在提取中，请等待...")
+            return
+
+        # 选择保存路径
+        video_dir = os.path.dirname(video_path)
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        audio_format = self.audio_extract_format_var.get().lower()
+        default_filename = f"{video_name}.{audio_format}"
+        default_path = os.path.join(video_dir, default_filename)
+
+        save_path = filedialog.asksaveasfilename(
+            title="选择保存位置",
+            initialfile=default_path,
+            defaultextension=f".{audio_format}",
+            filetypes=[
+                ("MP3文件", "*.mp3"),
+                ("AAC文件", "*.aac"),
+                ("WAV文件", "*.wav"),
+                ("FLAC文件", "*.flac"),
+                ("OGG文件", "*.ogg"),
+                ("所有文件", "*.*")
+            ]
+        )
+
+        if not save_path:
+            return
+
+        try:
+            # 获取参数
+            audio_format = self.audio_extract_format_var.get().lower()
+            audio_quality = self.audio_extract_quality_var.get()
+
+            # 构建FFmpeg命令
+            video_path_clean = os.path.abspath(video_path)
+
+            # 根据格式选择编码器和参数
+            ffmpeg_cmd = [
+                FFMPEG_PATH,
+                '-y',  # 覆盖已存在的文件
+                '-i', video_path_clean,  # 输入文件
+                '-vn',  # 不包含视频
+            ]
+
+            if audio_format == 'mp3':
+                ffmpeg_cmd.extend([
+                    '-acodec', 'libmp3lame',  # MP3编码器
+                    '-b:a', audio_quality,  # 音频比特率
+                    '-f', 'mp3',
+                    save_path
+                ])
+            elif audio_format == 'aac':
+                ffmpeg_cmd.extend([
+                    '-acodec', 'aac',  # AAC编码器
+                    '-b:a', audio_quality,  # 音频比特率
+                    '-f', 'adts',
+                    save_path
+                ])
+            elif audio_format == 'wav':
+                ffmpeg_cmd.extend([
+                    '-acodec', 'pcm_s16le',  # WAV编码器
+                    '-f', 'wav',
+                    save_path
+                ])
+            elif audio_format == 'flac':
+                ffmpeg_cmd.extend([
+                    '-acodec', 'flac',  # FLAC编码器
+                    '-f', 'flac',
+                    save_path
+                ])
+            elif audio_format == 'ogg':
+                ffmpeg_cmd.extend([
+                    '-acodec', 'libvorbis',  # OGG编码器
+                    '-b:a', audio_quality,  # 音频比特率
+                    '-f', 'ogg',
+                    save_path
+                ])
+            else:
+                # 默认使用MP3
+                ffmpeg_cmd.extend([
+                    '-acodec', 'libmp3lame',  # MP3编码器
+                    '-b:a', audio_quality,  # 音频比特率
+                    '-f', 'mp3',
+                    save_path
+                ])
+
+            print("FFmpeg提取音频命令:", " ".join(ffmpeg_cmd))
+
+            # 开始提取
+            self.is_audio_extract_processing = True
+            self.audio_extract_progress_var.set(0)
+            self.audio_extract_btn.config(state='disabled')
+            self.audio_extract_preview_btn.config(state='disabled')
+            self.audio_extract_stop_btn.config(state='normal')
+            self.audio_extract_status_label.config(text="正在提取...")
+
+            # 启动处理线程
+            process_thread = threading.Thread(
+                target=self.run_audio_extract,
+                args=(ffmpeg_cmd, save_path)
+            )
+            process_thread.start()
+
+        except Exception as e:
+            print(f"错误：提取失败 - {str(e)}")
+            self.is_audio_extract_processing = False
+            messagebox.showerror("错误", f"提取失败: {str(e)}")
+            self.audio_extract_btn.config(state='normal')
+            self.audio_extract_preview_btn.config(state='normal')
+            self.audio_extract_stop_btn.config(state='disabled')
+
+    def stop_audio_extract(self):
+        """停止音频提取"""
+        self.is_audio_extract_processing = False
+        self.audio_extract_status_label.config(text="已停止")
+        self.audio_extract_btn.config(state='normal')
+        self.audio_extract_preview_btn.config(state='normal')
+        self.audio_extract_stop_btn.config(state='disabled')
+
+    def run_audio_extract(self, cmd, output_path):
+        """执行音频提取"""
+        process = None
+        final_returncode = -1
+        try:
+            print("\n=== 开始执行音频提取FFmpeg命令 ===")
+            print("1. 检查FFmpeg路径...")
+            if not os.path.exists(FFMPEG_PATH):
+                raise Exception(f"FFmpeg不存在: {FFMPEG_PATH}")
+            print(f"FFmpeg路径: {FFMPEG_PATH}")
+
+            print("2. 检查输入文件...")
+            video_path = self.audio_extract_path_var.get()
+            if not os.path.exists(video_path):
+                raise Exception(f"输入视频不存在: {video_path}")
+            print(f"输入视频: {video_path}")
+
+            # 获取视频时长用于进度计算
+            video_duration = 0
+            try:
+                info_cmd = [FFMPEG_PATH, '-i', video_path]
+                if sys.platform == 'win32':
+                    cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in info_cmd)
+                    info_result = subprocess.run(
+                        cmd_str,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                else:
+                    info_result = subprocess.run(
+                        info_cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8'
+                    )
+
+                for line in info_result.stderr.split('\n'):
+                    if 'Duration:' in line:
+                        duration = line.split('Duration: ')[1].split(',')[0].strip()
+                        h, m, s = map(float, duration.split(':'))
+                        video_duration = h * 3600 + m * 60 + s
+                        break
+            except Exception as e:
+                print(f"获取视频时长失败: {e}，将无法显示准确进度")
+
+            print(f"视频时长: {video_duration:.2f}秒")
+
+            print("3. 执行FFmpeg命令...")
+            print("命令:", " ".join(cmd))
+
+            # 使用subprocess.Popen执行命令
+            if sys.platform == 'win32':
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    preexec_fn=os.setsid
+                )
+
+            # 将进程添加到跟踪列表
+            self.active_processes.append(process)
+            print(f"[DEBUG] 启动音频提取进程 PID: {process.pid}")
+
+            # 实时读取输出并更新进度
+            import time
+            last_progress = 0
+            last_file_size = 0
+            file_size_stable_count = 0
+            last_output_time = time.time()
+
+            while True:
+                # 检查进程是否已退出
+                if process.poll() is not None:
+                    print("[DEBUG] 音频提取FFmpeg进程已退出")
+                    break
+
+                # 检查是否应该停止处理
+                if not self.is_audio_extract_processing:
+                    print("[DEBUG] 收到停止信号，终止音频提取进程...")
+                    process.terminate()
+                    break
+
+                try:
+                    # 读取一行输出（非阻塞）
+                    import select
+                    if sys.platform != 'win32':
+                        ready, _, _ = select.select([process.stderr], [], [], 0.1)
+                        if ready:
+                            line = process.stderr.readline()
+                        else:
+                            line = None
+                    else:
+                        line = process.stderr.readline()
+
+                    if line:
+                        line = line.strip()
+                        print(line)
+                        last_output_time = time.time()
+
+                        # 解析进度信息
+                        if 'time=' in line:
+                            try:
+                                time_str = line.split('time=')[1].split(' ')[0].strip()
+                                h, m, s = map(float, time_str.split(':'))
+                                current_time = h * 3600 + m * 60 + s
+
+                                # 计算进度百分比
+                                if video_duration > 0:
+                                    progress = (current_time / video_duration) * 100
+                                    progress = min(progress, 98)
+
+                                    if progress > last_progress:
+                                        last_progress = progress
+                                        self.root.after(0, lambda p=progress: self.audio_extract_progress_var.set(p))
+                                        self.root.after(0, lambda p=progress: self.audio_extract_status_label.config(text=f"提取中... {p:.1f}%"))
+                                        print(f"进度: {progress:.1f}% ({current_time:.1f}s / {video_duration:.1f}s)")
+                            except Exception as e:
+                                print(f"进度解析错误: {e}")
+                except Exception as e:
+                    if "readline" not in str(e).lower():
+                        print(f"读取输出错误: {e}")
+
+                # 监控输出文件大小变化
+                if os.path.exists(output_path):
+                    try:
+                        current_file_size = os.path.getsize(output_path)
+                        if current_file_size > last_file_size:
+                            last_file_size = current_file_size
+                            file_size_stable_count = 0
+                        elif current_file_size == last_file_size and current_file_size > 0:
+                            file_size_stable_count += 1
+                        else:
+                            file_size_stable_count = 0
+
+                        if file_size_stable_count > 50:
+                            print(f"[DEBUG] 文件大小已稳定 {file_size_stable_count * 0.1:.1f}秒")
+                    except:
+                        pass
+
+                # 检查长时间无输出
+                elapsed_since_output = time.time() - last_output_time
+                if elapsed_since_output > 30:
+                    if process.poll() is None:
+                        print(f"[DEBUG] 超过30秒无输出，但进程仍在运行")
+                        if os.path.exists(output_path):
+                            file_size = os.path.getsize(output_path)
+                            if file_size > 0 and last_progress < 95:
+                                self.root.after(0, lambda: self.audio_extract_progress_var.set(95))
+                                self.root.after(0, lambda: self.audio_extract_status_label.config(text="提取中... 95%"))
+                                print(f"[DEBUG] 设置进度为95%")
+
+                time.sleep(0.1)
+
+            # 获取最终返回码
+            returncode = process.poll()
+            if returncode is None:
+                try:
+                    returncode = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    returncode = process.returncode if process.returncode is not None else -1
+
+            # 读取剩余输出
+            try:
+                if process.stdin and not process.stdin.closed:
+                    process.stdin.close()
+                stdout, stderr = process.communicate(timeout=2)
+            except:
+                stdout, stderr = "", ""
+
+            final_returncode = returncode
+
+            print("4. 检查执行结果...")
+            print(f"返回码: {final_returncode}")
+
+            # 处理结果
+            if final_returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                print("音频提取完成！")
+                self.root.after(0, lambda: self.audio_extract_progress_var.set(100))
+                self.root.after(0, lambda: self.audio_extract_status_label.config(text="提取完成"))
+                self.root.after(0, lambda: messagebox.showinfo("成功", f"音频提取完成:\n{output_path}"))
+            else:
+                error_msg = f"提取失败（返回码: {final_returncode}）"
+                if stderr:
+                    error_msg += f"\n{stderr[-500:]}"
+                print(error_msg)
+                self.root.after(0, lambda msg=error_msg: messagebox.showerror("错误", msg))
+                self.root.after(0, lambda: self.audio_extract_progress_var.set(0))
+                self.root.after(0, lambda: self.audio_extract_status_label.config(text="提取失败"))
+
+        except Exception as e:
+            error_msg = f"执行失败: {str(e)}"
+            print(error_msg)
+            logger.error(error_msg)
+            self.root.after(0, lambda msg=error_msg: messagebox.showerror("错误", msg))
+            self.root.after(0, lambda: self.audio_extract_progress_var.set(0))
+            self.root.after(0, lambda: self.audio_extract_status_label.config(text="提取失败"))
+        finally:
+            print("5. 清理状态和进程资源...")
+
+            # 清理进程资源
+            if process is not None:
+                try:
+                    process_pid = process.pid if hasattr(process, 'pid') else 'unknown'
+                    print(f"[DEBUG] 开始清理音频提取进程 PID: {process_pid}")
+
+                    # 关闭所有管道
+                    for pipe_name in ['stdin', 'stdout', 'stderr']:
+                        pipe = getattr(process, pipe_name, None)
+                        if pipe and not pipe.closed:
+                            try:
+                                pipe.close()
+                                print(f"[DEBUG] 已关闭 {pipe_name} 管道")
+                            except Exception as e:
+                                print(f"[DEBUG] 关闭 {pipe_name} 管道时出错: {e}")
+
+                    # 确保进程已完全结束
+                    if process.poll() is None:
+                        print(f"[DEBUG] 音频提取进程 {process_pid} 仍在运行，尝试终止...")
+                        try:
+                            process.terminate()
+                            try:
+                                process.wait(timeout=2)
+                                print(f"[DEBUG] 进程 {process_pid} 已通过terminate结束")
+                            except subprocess.TimeoutExpired:
+                                print(f"[DEBUG] 进程 {process_pid} terminate后仍运行，强制kill")
+                                try:
+                                    process.kill()
+                                    process.wait(timeout=1)
+                                    print(f"[DEBUG] 进程 {process_pid} 已通过kill结束")
+                                except:
+                                    print(f"[DEBUG] 警告：进程 {process_pid} kill后仍可能运行")
+                        except Exception as e:
+                            print(f"[DEBUG] 终止进程时出错: {e}")
+
+                    # 从活跃进程列表中移除
+                    if process in self.active_processes:
+                        self.active_processes.remove(process)
+                        print(f"[DEBUG] 从活跃进程列表中移除音频提取进程 PID: {process_pid}")
+
+                    print(f"[DEBUG] 音频提取进程 {process_pid} 清理完成")
+                except Exception as e:
+                    print(f"[DEBUG] 清理音频提取进程时出错: {e}")
+
+            # 更新状态标志
+            self.is_audio_extract_processing = False
+
+            # 重新启用按钮
+            self.root.after(0, lambda: self.audio_extract_btn.config(state='normal'))
+            self.root.after(0, lambda: self.audio_extract_preview_btn.config(state='normal'))
+            self.root.after(0, lambda: self.audio_extract_stop_btn.config(state='disabled'))
+
+            # 根据最终返回码处理进度条
+            final_rc = final_returncode if 'final_returncode' in locals() else (process.returncode if process and process.returncode is not None else -1)
+            if final_rc != 0:
+                self.root.after(0, lambda: self.audio_extract_progress_var.set(0))
+                print(f"[DEBUG] 处理失败（返回码: {final_rc}），重置进度条")
+
+            print("=== 音频提取FFmpeg命令执行完成 ===\n")
 
     def start_video_convert(self):
         """开始视频转换"""
@@ -6220,6 +6855,114 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         self.video_convert_cap = None
         self.is_video_convert_processing = False
         self.video_convert_process = None
+
+    def create_audio_extract_tab(self):
+        """创建音频提取标签页界面"""
+        # 主框架
+        main_frame = tk.Frame(self.audio_extract_tab, bg="#333333")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # 配置主框架的网格权重
+        main_frame.grid_rowconfigure(1, weight=1)  # 预览区域可扩展
+        main_frame.grid_rowconfigure(3, weight=0)  # 控制区域固定大小
+
+        # 文件选择区域
+        file_frame = tk.Frame(main_frame, bg="#333333")
+        file_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(file_frame, text="视频文件：").pack(side=tk.LEFT, padx=(0, 5))
+        self.audio_extract_path_var = tk.StringVar()
+        ttk.Entry(file_frame, textvariable=self.audio_extract_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(file_frame, text="选择视频", command=self.select_video_for_audio_extract).pack(side=tk.LEFT, padx=(0, 10))
+
+        # 拖放支持
+        self.audio_extract_path_var.trace('w', self.on_audio_extract_file_changed)
+
+        # 预览区域
+        preview_frame = tk.Frame(main_frame, bg="#1e1e1e")
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        # 视频预览画布
+        self.audio_extract_preview_canvas = tk.Canvas(preview_frame, bg="#1e1e1e", bd=0, highlightthickness=0)
+        self.audio_extract_preview_canvas.pack(fill=tk.BOTH, expand=True)
+
+        # 视频信息显示
+        self.audio_extract_info_label = tk.Label(preview_frame, text="请选择视频文件",
+                                                bg="#1e1e1e", fg="white", font=("Arial", 12))
+        self.audio_extract_info_label.pack(pady=20)
+
+        # 进度条拖动区域 - 在预览区域和控制区域之间
+        progress_slider_frame = tk.Frame(main_frame, bg="#333333")
+        progress_slider_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # 播放进度条（可拖动）
+        self.audio_extract_progress_slider = ttk.Scale(
+            progress_slider_frame,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            command=self.on_audio_extract_progress_change
+        )
+        self.audio_extract_progress_slider.pack(fill=tk.X, padx=5)
+        self.audio_extract_progress_slider.config(state='disabled')  # 初始禁用，直到加载视频
+
+        # 控制区域
+        control_frame = tk.Frame(main_frame, bg="#333333")
+        control_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # 音频格式选择
+        format_frame = tk.Frame(control_frame, bg="#333333")
+        format_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(format_frame, text="音频格式：").pack(side=tk.LEFT, padx=(0, 5))
+        self.audio_extract_format_var = tk.StringVar(value="MP3")
+        format_options = ["MP3", "AAC", "WAV", "FLAC", "OGG"]
+        format_combo = ttk.Combobox(
+            format_frame,
+            textvariable=self.audio_extract_format_var,
+            values=format_options,
+            state="readonly",
+            width=10
+        )
+        format_combo.pack(side=tk.LEFT, padx=(0, 20))
+
+        # 音频质量选择
+        ttk.Label(format_frame, text="音频质量：").pack(side=tk.LEFT, padx=(0, 5))
+        self.audio_extract_quality_var = tk.StringVar(value="192k")
+        quality_options = ["128k", "192k", "256k", "320k"]
+        quality_combo = ttk.Combobox(
+            format_frame,
+            textvariable=self.audio_extract_quality_var,
+            values=quality_options,
+            state="readonly",
+            width=10
+        )
+        quality_combo.pack(side=tk.LEFT, padx=(0, 20))
+
+        # 按钮区域
+        button_frame = tk.Frame(control_frame, bg="#333333")
+        button_frame.pack(fill=tk.X)
+
+        # 预览按钮
+        self.audio_extract_preview_btn = ttk.Button(button_frame, text="预览视频", command=self.preview_audio_extract)
+        self.audio_extract_preview_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 提取音频按钮
+        self.audio_extract_btn = ttk.Button(button_frame, text="提取音频", command=self.start_audio_extract)
+        self.audio_extract_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 停止按钮
+        self.audio_extract_stop_btn = ttk.Button(button_frame, text="停止", command=self.stop_audio_extract, state='disabled')
+        self.audio_extract_stop_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 进度条
+        self.audio_extract_progress_var = tk.DoubleVar()
+        self.audio_extract_progress_bar = ttk.Progressbar(main_frame, variable=self.audio_extract_progress_var, maximum=100)
+        self.audio_extract_progress_bar.pack(fill=tk.X, pady=(10, 0))
+
+        # 状态标签
+        self.audio_extract_status_label = tk.Label(main_frame, text="", bg="#333333", fg="white")
+        self.audio_extract_status_label.pack(pady=(5, 0))
 
     def __del__(self):
         """清理资源"""
