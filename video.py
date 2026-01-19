@@ -1405,9 +1405,14 @@ class VideoTrimmerPro:
                 # 如果utf-8失败，尝试使用系统默认编码
                 abs_path = abs_path.encode(sys.getfilesystemencoding(), errors='ignore').decode(sys.getfilesystemencoding())
 
+            # 尝试使用默认后端打开视频
             self.cap = cv2.VideoCapture(abs_path)
             if not self.cap.isOpened():
-                raise Exception("无法打开视频文件")
+                # 如果默认后端失败，尝试使用FFmpeg后端（对MOV等格式支持更好）
+                logger.debug(f"默认后端无法打开视频，尝试FFmpeg后端: {abs_path}")
+                self.cap = cv2.VideoCapture(abs_path, cv2.CAP_FFMPEG)
+                if not self.cap.isOpened():
+                    raise Exception("无法打开视频文件，请确保视频格式受支持")
 
             # 获取视频信息
             self.fps = self.cap.get(cv2.CAP_PROP_FPS)
@@ -1463,30 +1468,81 @@ class VideoTrimmerPro:
                     timestamp = position
                     output_path = os.path.join(os.path.dirname(self.video_path), 'temp_frame.jpg')
 
-                    # 构建优化后的ffmpeg命令，增强硬件加速支持
+                    # 构建通用的FFmpeg命令，支持更多视频格式和编码
+                    # 使用软解码作为默认方案，因为它兼容性最好
+                    # 添加更多参数以确保兼容性
                     ffmpeg_cmd = [
                         FFMPEG_PATH,
                         '-y',  # 覆盖已存在的文件
-                        '-hwaccel', 'auto',  # 自动选择硬件加速
-                        '-hwaccel_device', '0',  # 使用第一个可用的硬件设备
-                        '-hwaccel_output_format', 'nv12',  # 优化硬件加速输出格式
-                        '-ss', f'{timestamp:.3f}',  # 设置时间戳
+                        '-ss', f'{timestamp:.3f}',  # 先设置时间戳（放在-i之前，更快更准确）
                         '-i', self.video_path,
                         '-vframes', '1',  # 只截取一帧
-                        '-q:v', '5',  # 稍微降低质量以提高速度
-                        '-preset', 'ultrafast',  # 使用最快的编码预设
-                        '-tune', 'fastdecode',  # 优化解码速度
-                        '-f', 'image2',  # 强制使用image2格式
+                        '-q:v', '2',  # 图片质量（2-31，2是高质量）
+                        '-pix_fmt', 'rgb24',  # 使用RGB24像素格式，兼容性最好
+                        '-f', 'image2',  # 输出格式
+                        '-v', 'error',  # 只显示错误信息，减少输出
                         output_path
                     ]
 
                     # 执行ffmpeg命令 - 修复中文路径编码问题
+                    result = None
+                    ffmpeg_success = False
+                    
                     if sys.platform == 'win32':
-                        # 将命令列表转换为字符串，确保路径编码正确
-                        cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in ffmpeg_cmd)
-                        subprocess.run(cmd_str, shell=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                        try:
+                            result = subprocess.run(
+                                ffmpeg_cmd,
+                                capture_output=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW,
+                                timeout=10,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace'
+                            )
+                            if result.returncode == 0 and os.path.exists(output_path):
+                                ffmpeg_success = True
+                        except subprocess.TimeoutExpired:
+                            logger.debug(f"FFmpeg截取帧超时: {self.video_path}")
+                            result = None
+                        except Exception as e:
+                            logger.debug(f"执行FFmpeg命令时出错: {e}")
+                            result = None
                     else:
-                        subprocess.run(ffmpeg_cmd, capture_output=True)
+                        try:
+                            result = subprocess.run(
+                                ffmpeg_cmd,
+                                capture_output=True,
+                                timeout=10,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace'
+                            )
+                            if result.returncode == 0 and os.path.exists(output_path):
+                                ffmpeg_success = True
+                        except subprocess.TimeoutExpired:
+                            logger.debug(f"FFmpeg截取帧超时: {self.video_path}")
+                            result = None
+                        except Exception as e:
+                            logger.debug(f"执行FFmpeg命令时出错: {e}")
+                            result = None
+                    
+                    # 如果FFmpeg失败，尝试使用OpenCV作为回退
+                    if not ffmpeg_success:
+                        if result is not None and result.returncode != 0:
+                            error_msg = result.stderr[:200] if result.stderr else "未知错误"
+                            logger.debug(f"FFmpeg截取帧失败(返回码: {result.returncode})，使用OpenCV回退: {error_msg}")
+                        else:
+                            logger.debug(f"FFmpeg未返回结果，使用OpenCV回退")
+                        
+                        # 使用OpenCV作为回退方案
+                        try:
+                            self._show_frame_impl(position)
+                            self.is_preview_loading = False
+                            return
+                        except Exception as e:
+                            logger.warning(f"OpenCV回退也失败: {e}")
+                            self.is_preview_loading = False
+                            return
 
                     # 再次检查是否是最新的预览任务
                     if self.current_preview_task != new_task_id:
@@ -1542,43 +1598,85 @@ class VideoTrimmerPro:
                     pass
 
     def _show_frame_impl(self, position):
-        """实际的帧显示逻辑"""
-        if self.cap:
+        """实际的帧显示逻辑（OpenCV回退方案）"""
+        if not self.cap or not self.cap.isOpened():
+            logger.warning("视频未打开，无法使用OpenCV回退")
+            return
+        
+        try:
+            # 计算目标帧号
             current_frame = int(position * self.fps)
+            if current_frame < 0:
+                current_frame = 0
+            if current_frame >= self.total_frames:
+                current_frame = self.total_frames - 1
+            
+            # 设置视频位置
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+            
+            # 读取帧
             ret, frame = self.cap.read()
-            if ret:
-                # 高性能缩放处理
-                scale = self.preview_scale  # 统一使用更低的预览质量
+            if not ret or frame is None or frame.size == 0:
+                logger.warning(f"无法读取帧，位置: {position}, 帧号: {current_frame}")
+                return
+            
+            # 高性能缩放处理
+            scale = self.preview_scale  # 统一使用更低的预览质量
+            if scale < 1.0:
                 frame = cv2.resize(frame, (0, 0),
                                    fx=scale,
                                    fy=scale,
                                    interpolation=cv2.INTER_NEAREST)  # 使用最快速的插值方法
 
-                # 转换为RGB格式
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(frame)
-
-                # 自适应显示
-                canvas_width = self.drop_canvas.winfo_width()
-                canvas_height = self.drop_canvas.winfo_height()
-
-                img_ratio = img.width / img.height
-                canvas_ratio = canvas_width / canvas_height
-
-                if img_ratio > canvas_ratio:
-                    new_width = canvas_width
-                    new_height = int(canvas_width / img_ratio)
+            # 转换为RGB格式
+            try:
+                if len(frame.shape) == 3:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                elif len(frame.shape) == 2:
+                    # 灰度图转RGB
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
                 else:
-                    new_height = canvas_height
-                    new_width = int(canvas_height * img_ratio)
+                    logger.warning(f"不支持的帧格式，shape: {frame.shape}")
+                    return
+            except Exception as e:
+                logger.warning(f"颜色转换失败: {e}")
+                return
+            
+            # 转换为PIL Image
+            try:
+                img = Image.fromarray(frame)
+            except Exception as e:
+                logger.warning(f"PIL Image转换失败: {e}")
+                return
 
-                img = img.resize((new_width, new_height), Image.Resampling.NEAREST)  # 使用最快的重采样方法
-                self.preview_img = ImageTk.PhotoImage(img)
-                self.drop_canvas.create_image(
-                    canvas_width // 2, canvas_height // 2,
-                    image=self.preview_img, anchor=tk.CENTER
-                )
+            # 自适应显示
+            canvas_width = self.drop_canvas.winfo_width()
+            canvas_height = self.drop_canvas.winfo_height()
+            
+            if canvas_width <= 1 or canvas_height <= 1:
+                # 画布还未初始化，跳过显示
+                return
+
+            img_ratio = img.width / img.height
+            canvas_ratio = canvas_width / canvas_height
+
+            if img_ratio > canvas_ratio:
+                new_width = canvas_width
+                new_height = int(canvas_width / img_ratio)
+            else:
+                new_height = canvas_height
+                new_width = int(canvas_height * img_ratio)
+
+            img = img.resize((new_width, new_height), Image.Resampling.NEAREST)  # 使用最快的重采样方法
+            self.preview_img = ImageTk.PhotoImage(img)
+            self.drop_canvas.delete("all")  # 清除之前的图像
+            self.drop_canvas.create_image(
+                canvas_width // 2, canvas_height // 2,
+                image=self.preview_img, anchor=tk.CENTER
+            )
+        except Exception as e:
+            logger.error(f"OpenCV显示帧时出错: {e}")
+            return
 
     def move_start(self, event):
         """移动开始滑块"""
