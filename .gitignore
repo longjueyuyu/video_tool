@@ -1,1 +1,5 @@
 /.idea/
+/build/
+/dist/
+/dist_油管/
+/test_tubeorigin_output/

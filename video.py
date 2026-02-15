@@ -299,6 +299,16 @@ class VideoTrimmerPro:
         # 进程管理
         self.active_processes = []  # 跟踪所有活跃的FFmpeg进程
 
+        # 视频旋转相关
+        self.rotation_cap = None
+        self.rotation_duration = 0.0
+        self.rotation_fps = 30
+        self.rotation_total_frames = 0
+        self.rotation_is_processing = False
+        self.rotation_preview_lock = threading.Lock()
+        self.rotation_current_preview_task = None
+        self.rotation_preview_timer = None
+
         # 创建界面组件
         self.create_widgets()
 
@@ -331,6 +341,10 @@ class VideoTrimmerPro:
         # 合并标签页
         self.merge_tab = ttk.Frame(self.tab_control)
         self.tab_control.add(self.merge_tab, text="视频合并")
+
+        # 视频旋转标签页
+        self.rotation_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.rotation_tab, text="视频旋转")
 
         # 硬字幕标签页
         self.subtitle_tab = ttk.Frame(self.tab_control)
@@ -667,6 +681,109 @@ class VideoTrimmerPro:
         self.progress_bar = ttk.Progressbar(preview_frame, variable=self.progress_var, maximum=100)
         self.progress_bar.pack(fill=tk.X, padx=20, pady=5)
 
+        # ========== 视频旋转标签页内容 ==========
+        rotation_main = tk.Frame(self.rotation_tab, bg="#333333")
+        rotation_main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        rotation_main.grid_rowconfigure(1, weight=1)
+        rotation_main.grid_columnconfigure(0, weight=1)
+
+        # 文件选择行
+        rotation_file_frame = tk.Frame(rotation_main, bg="#333333")
+        rotation_file_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(rotation_file_frame, text="视频文件：").pack(side=tk.LEFT, padx=(0, 5))
+        self.rotation_video_path_var = tk.StringVar()
+        ttk.Entry(rotation_file_frame, textvariable=self.rotation_video_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(rotation_file_frame, text="选择视频", command=self.select_rotation_video).pack(side=tk.LEFT, padx=(0, 15))
+
+        # 预览区域
+        rotation_preview_frame = tk.Frame(rotation_main, bg="#1e1e1e")
+        rotation_preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        rotation_preview_frame.grid_rowconfigure(0, weight=1)
+        rotation_preview_frame.grid_columnconfigure(0, weight=1)
+        self.rotation_canvas = tk.Canvas(rotation_preview_frame, bg="#1e1e1e", bd=0, highlightthickness=0)
+        self.rotation_canvas.pack(fill=tk.BOTH, expand=True)
+        self.rotation_canvas.bind("<Configure>", self._redraw_rotation_drop_area)
+        self.rotation_canvas.bind("<Button-1>", lambda e: self.select_rotation_video())  # 像剪切页一样点击中心图标选择文件
+        self.rotation_canvas.drop_target_register(DND_FILES)
+        self.rotation_canvas.dnd_bind('<<Drop>>', self.handle_drop)
+
+        # 播放进度条（拖动预览旋转效果）
+        rotation_slider_frame = tk.Frame(rotation_main, bg="#333333")
+        rotation_slider_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(rotation_slider_frame, text="播放进度：").pack(side=tk.LEFT, padx=(0, 5))
+        self.rotation_playback_slider = ttk.Scale(
+            rotation_slider_frame,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            command=self._on_rotation_playback_change
+        )
+        self.rotation_playback_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        # 控制区域 - 与硬字幕一致：左侧选项 + 右侧按钮同一行
+        rotation_control_frame = tk.Frame(rotation_main, bg="#333333")
+        rotation_control_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # 样式/选项区域 - 左侧
+        rotation_style_frame = tk.Frame(rotation_control_frame, bg="#333333")
+        rotation_style_frame.pack(side=tk.LEFT, fill=tk.X)
+
+        ttk.Label(rotation_style_frame, text="旋转角度：").pack(side=tk.LEFT, padx=(0, 5))
+        self.rotation_angle_var = tk.StringVar(value="0°")
+        rotation_angles = ["0°", "90°", "180°", "270°"]
+        rotation_angle_combo = ttk.Combobox(
+            rotation_style_frame,
+            textvariable=self.rotation_angle_var,
+            values=rotation_angles,
+            state="readonly",
+            width=6
+        )
+        rotation_angle_combo.pack(side=tk.LEFT, padx=(0, 15))
+        rotation_angle_combo.bind('<<ComboboxSelected>>', lambda e: self._on_rotation_angle_or_slider_change())
+
+        ttk.Label(rotation_style_frame, text="GPU加速：").pack(side=tk.LEFT, padx=(0, 5))
+        self.rotation_gpu_var = tk.StringVar(value="无GPU")
+        rotation_gpu_combo = ttk.Combobox(
+            rotation_style_frame,
+            textvariable=self.rotation_gpu_var,
+            values=[opt["label"] for opt in [
+                {"label": "无GPU", "value": ""},
+                {"label": "NVIDIA显卡", "value": "h264_nvenc"},
+                {"label": "NVIDIA高性能", "value": "h264_nvenc_fast"},
+                {"label": "Intel集成显卡", "value": "hevc_qsv"},
+                {"label": "AMD 显卡", "value": "av1_amf"},
+                {"label": "VAAPI", "value": "h264_vaapi"}
+            ]],
+            state="readonly",
+            width=10
+        )
+        rotation_gpu_combo.pack(side=tk.LEFT, padx=(0, 15))
+        self.rotation_gpu_mapping = {"无GPU": "", "NVIDIA显卡": "h264_nvenc", "NVIDIA高性能": "h264_nvenc_fast",
+                                    "Intel集成显卡": "hevc_qsv", "AMD 显卡": "av1_amf", "VAAPI": "h264_vaapi"}
+
+        # 按钮区域 - 右侧（与硬字幕 button_frame 一致）
+        rotation_btn_frame = tk.Frame(rotation_control_frame, bg="#333333")
+        rotation_btn_frame.pack(side=tk.RIGHT)
+        self.rotation_apply_btn = ttk.Button(rotation_btn_frame, text="开始", command=self.apply_rotation, width=10)
+        self.rotation_apply_btn.pack(side=tk.LEFT, padx=5)
+        self.rotation_stop_btn = ttk.Button(rotation_btn_frame, text="停止", command=self.stop_rotation_process, width=10, state="disabled")
+        self.rotation_stop_btn.pack(side=tk.LEFT, padx=5)
+
+        # 旋转进度条
+        self.rotation_progress_var = tk.DoubleVar()
+        self.rotation_progress_bar = ttk.Progressbar(rotation_main, variable=self.rotation_progress_var, maximum=100)
+        self.rotation_progress_bar.pack(fill=tk.X, pady=5)
+
+    def _redraw_rotation_drop_area(self, event=None):
+        """旋转页未加载视频时重绘拖放提示"""
+        if not getattr(self, 'rotation_video_path_var', None) or not self.rotation_video_path_var.get():
+            self.rotation_canvas.delete("all")
+            w = self.rotation_canvas.winfo_width()
+            h = self.rotation_canvas.winfo_height()
+            if w > 10 and h > 10:
+                self.rotation_canvas.create_text(w/2, h/2 - 20, text="+", font=("Arial", 48), fill="#666666")
+                self.rotation_canvas.create_text(w/2, h/2 + 20, text="请选择视频", font=("微软雅黑", 12), fill="#888888")
+
     def handle_drop(self, event):
         """处理文件拖放"""
         files = event.data
@@ -779,6 +896,9 @@ class VideoTrimmerPro:
             print(f"[DEBUG] 在剪切标签页，加载第一个视频文件")
             # 只处理第一个视频文件
             self.load_video(video_files[0])
+        elif current_tab == self.tab_control.tabs()[2]:  # 视频旋转标签页
+            print(f"[DEBUG] 在视频旋转标签页，加载第一个视频文件")
+            self.load_rotation_video(video_files[0])
         else:  # 合并标签页
             print(f"[DEBUG] 在合并标签页，开始处理 {len(video_files)} 个文件到合并列表")
             for file_path in video_files:
@@ -2069,6 +2189,426 @@ class VideoTrimmerPro:
         self.preview_enabled = True  # 重新启用预览功能
         self.progress_var.set(0)  # 重置进度条
         self.control_btn.config(text="开始剪辑")
+
+    def select_rotation_video(self):
+        """选择要旋转的视频文件"""
+        file_path = filedialog.askopenfilename(
+            title="选择视频文件",
+            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.flv *.ts *.wmv")]
+        )
+        if file_path:
+            self.rotation_video_path_var.set(file_path)
+            self.load_rotation_video(file_path)
+
+    def load_rotation_video(self, path):
+        """加载旋转页视频（复用与剪切一致的中文路径处理）"""
+        try:
+            abs_path = os.path.abspath(path)
+            try:
+                abs_path = abs_path.encode('utf-8', errors='ignore').decode('utf-8')
+            except UnicodeEncodeError:
+                abs_path = abs_path.encode(sys.getfilesystemencoding(), errors='ignore').decode(sys.getfilesystemencoding())
+
+            cap = cv2.VideoCapture(abs_path)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(abs_path, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                raise Exception("无法打开视频文件，请确保视频格式受支持")
+
+            if self.rotation_cap is not None:
+                self.rotation_cap.release()
+            self.rotation_cap = cap
+            self.rotation_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            self.rotation_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.rotation_duration = self.rotation_total_frames / self.rotation_fps if self.rotation_fps > 0 else 0
+            self.rotation_video_path_var.set(abs_path)
+
+            self.rotation_playback_slider.set(0)
+            self.show_rotation_frame(0)
+        except Exception as e:
+            messagebox.showerror("错误", f"加载失败: {str(e)}")
+
+    def _on_rotation_angle_or_slider_change(self):
+        """旋转角度改变时刷新当前进度位置的预览"""
+        try:
+            v = self.rotation_playback_slider.get()
+            pos = (float(v) / 100.0) * self.rotation_duration if self.rotation_duration > 0 else 0
+            self.show_rotation_frame(pos)
+        except Exception:
+            pass
+
+    def _on_rotation_playback_change(self, value):
+        """拖动播放进度条时预览旋转效果"""
+        if self.rotation_is_processing or not self.rotation_duration:
+            return
+        try:
+            pos = (float(value) / 100.0) * self.rotation_duration
+            self.show_rotation_frame(pos)
+        except Exception:
+            pass
+
+    def show_rotation_frame(self, position):
+        """在旋转预览画布上显示指定时间点的帧（应用当前旋转角度，复用剪切页的帧提取与中文路径逻辑）"""
+        if self.rotation_is_processing or not getattr(self, 'rotation_cap', None):
+            return
+        angle_key = self.rotation_angle_var.get()
+        if angle_key == "0°":
+            rot_enum = None
+        elif angle_key == "90°":
+            rot_enum = cv2.ROTATE_90_CLOCKWISE
+        elif angle_key == "180°":
+            rot_enum = cv2.ROTATE_180
+        elif angle_key == "270°":
+            rot_enum = cv2.ROTATE_90_COUNTERCLOCKWISE
+        else:
+            rot_enum = None
+
+        path = self.rotation_video_path_var.get()
+        if not path or not os.path.exists(path):
+            return
+
+        new_task_id = id(threading.current_thread())
+        self.rotation_current_preview_task = new_task_id
+        if self.rotation_preview_timer:
+            self.root.after_cancel(self.rotation_preview_timer)
+            self.rotation_preview_timer = None
+
+        def do_preview():
+            try:
+                if self.rotation_current_preview_task != new_task_id or self.rotation_is_processing:
+                    return
+                output_path = os.path.join(os.path.dirname(path), 'temp_rotation_frame.jpg')
+                ffmpeg_cmd = [
+                    FFMPEG_PATH, '-y', '-ss', f'{position:.3f}', '-i', path,
+                    '-vframes', '1', '-q:v', '2', '-pix_fmt', 'rgb24', '-f', 'image2', '-v', 'error', output_path
+                ]
+                if sys.platform == 'win32':
+                    cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in ffmpeg_cmd)
+                    result = subprocess.run(
+                        cmd_str, shell=True, capture_output=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW, timeout=10,
+                        text=True, encoding='utf-8', errors='replace'
+                    )
+                else:
+                    result = subprocess.run(
+                        ffmpeg_cmd, capture_output=True, timeout=10,
+                        text=True, encoding='utf-8', errors='replace'
+                    )
+                if self.rotation_current_preview_task != new_task_id or self.rotation_is_processing:
+                    return
+                if result.returncode != 0 or not os.path.exists(output_path):
+                    self._show_rotation_frame_opencv(position, rot_enum)
+                else:
+                    img = Image.open(output_path)
+                    try:
+                        os.remove(output_path)
+                    except Exception:
+                        pass
+                    if rot_enum is not None:
+                        img = img.transpose(
+                            Image.ROTATE_270 if rot_enum == cv2.ROTATE_90_CLOCKWISE else
+                            Image.ROTATE_180 if rot_enum == cv2.ROTATE_180 else Image.ROTATE_90
+                        )
+                    self._display_rotation_image(img)
+            except Exception as e:
+                logger.debug(f"旋转预览失败: {e}")
+                try:
+                    self._show_rotation_frame_opencv(position, rot_enum)
+                except Exception:
+                    pass
+
+        self.rotation_preview_timer = self.root.after(50, do_preview)
+
+    def _show_rotation_frame_opencv(self, position, rot_enum):
+        """使用 OpenCV 读取帧并旋转后显示（回退方案）"""
+        if not self.rotation_cap or not self.rotation_cap.isOpened():
+            return
+        current_frame = int(position * self.rotation_fps)
+        current_frame = max(0, min(current_frame, self.rotation_total_frames - 1)) if self.rotation_total_frames else 0
+        self.rotation_cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+        ret, frame = self.rotation_cap.read()
+        if not ret or frame is None:
+            return
+        if rot_enum is not None:
+            frame = cv2.rotate(frame, rot_enum)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame)
+        self._display_rotation_image(img)
+
+    def _display_rotation_image(self, img):
+        """在旋转预览画布上显示 PIL Image"""
+        def show():
+            try:
+                cw = self.rotation_canvas.winfo_width()
+                ch = self.rotation_canvas.winfo_height()
+                if cw <= 1 or ch <= 1:
+                    return
+                ir = img.width / img.height
+                cr = cw / ch
+                if ir > cr:
+                    nw, nh = cw, int(cw / ir)
+                else:
+                    nh, nw = ch, int(ch * ir)
+                img_resized = img.resize((nw, nh), Image.Resampling.NEAREST)
+                self.rotation_preview_img = ImageTk.PhotoImage(img_resized)
+                self.rotation_canvas.delete("all")
+                self.rotation_canvas.create_image(cw // 2, ch // 2, image=self.rotation_preview_img, anchor=tk.CENTER)
+            except Exception:
+                pass
+        self.root.after(0, show)
+
+    def _get_rotation_video_bitrate_kbps(self, video_path):
+        """获取原视频视频流比特率（kbps），与硬字幕 get_video_bitrate 一致，用于旋转接近原画质。失败返回 None。"""
+        try:
+            ffprobe_cmd = [
+                find_ffprobe_path(),
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=bit_rate',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                video_path
+            ]
+            if sys.platform == 'win32':
+                cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in ffprobe_cmd)
+                result = subprocess.run(
+                    cmd_str, shell=True, capture_output=True, text=True, encoding='utf-8',
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                result = subprocess.run(
+                    ffprobe_cmd, capture_output=True, text=True, encoding='utf-8'
+                )
+            if result.returncode == 0 and result.stdout.strip():
+                bitrate_bps = int(result.stdout.strip())
+                return int(bitrate_bps / 1000)
+            # 尝试 format 总比特率作为回退
+            ffprobe_cmd_fmt = [
+                find_ffprobe_path(), '-v', 'error', '-show_entries', 'format=bit_rate',
+                '-of', 'default=noprint_wrappers=1:nokey=1', video_path
+            ]
+            if sys.platform == 'win32':
+                cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in ffprobe_cmd_fmt)
+                result = subprocess.run(cmd_str, shell=True, capture_output=True, text=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                result = subprocess.run(ffprobe_cmd_fmt, capture_output=True, text=True, encoding='utf-8')
+            if result.returncode == 0 and result.stdout.strip():
+                bitrate_bps = int(result.stdout.strip())
+                return int(bitrate_bps / 1000)
+        except Exception as e:
+            logger.debug(f"获取旋转原视频比特率失败: {e}")
+        return None
+
+    def apply_rotation(self):
+        """确认并执行视频旋转（使用原视频比特率，GPU/CPU 均接近原画质，复用硬字幕逻辑）"""
+        path = self.rotation_video_path_var.get()
+        if not path or not os.path.exists(path):
+            messagebox.showerror("错误", "请先选择有效的视频文件")
+            return
+        angle_key = self.rotation_angle_var.get()
+        if angle_key == "0°":
+            messagebox.showinfo("提示", "当前选择为 0°，无需旋转")
+            return
+        abs_path = os.path.abspath(path)
+        base, ext = os.path.splitext(abs_path)
+        counter = 1
+        while True:
+            output_path = f"{base}_rotated_{counter}{ext}"
+            if not os.path.exists(output_path):
+                break
+            counter += 1
+
+        # 像硬字幕一样获取原视频比特率，旋转时传入以接近原画质
+        source_bitrate_kbps = self._get_rotation_video_bitrate_kbps(abs_path)
+        if source_bitrate_kbps is None or source_bitrate_kbps <= 0:
+            source_bitrate_kbps = 5000
+            print("[DEBUG] 旋转：未获取到原视频比特率，使用默认 5000k")
+        else:
+            print(f"[DEBUG] 旋转：使用原视频比特率 {source_bitrate_kbps}k")
+        output_bitrate = f"{source_bitrate_kbps}k"
+
+        # FFmpeg transpose: 90°顺时针=1, 180°=3, 270°顺时针=2(逆时针90°)
+        transpose_map = {"90°": "1", "180°": "3", "270°": "2"}
+        transpose_val = transpose_map.get(angle_key)
+        if not transpose_val:
+            return
+        vf = f"transpose={transpose_val}"
+
+        gpu_opt = self.rotation_gpu_var.get()
+        encoder = self.rotation_gpu_mapping.get(gpu_opt, "")
+        video_duration = self.rotation_duration
+
+        ffmpeg_cmd = [
+            FFMPEG_PATH, '-y', '-i', abs_path,
+            '-vf', vf,
+            '-c:a', 'copy',
+        ]
+        if encoder:
+            if encoder == "h264_nvenc_fast":
+                ffmpeg_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-b:v', output_bitrate])
+            elif encoder == "h264_nvenc":
+                ffmpeg_cmd.extend(['-c:v', encoder, '-preset', 'p4', '-b:v', output_bitrate])
+            elif encoder in ("hevc_qsv", "h264_qsv", "h265_qsv"):
+                ffmpeg_cmd.extend(['-c:v', encoder, '-b:v', output_bitrate])
+            elif encoder in ("h264_amf", "av1_amf"):
+                ffmpeg_cmd.extend(['-c:v', encoder, '-b:v', output_bitrate])
+            elif encoder == "h264_vaapi":
+                ffmpeg_cmd.extend(['-c:v', encoder, '-b:v', output_bitrate])
+            else:
+                ffmpeg_cmd.extend(['-c:v', encoder, '-b:v', output_bitrate])
+        else:
+            ffmpeg_cmd.extend(['-c:v', 'libx264', '-preset', 'medium', '-b:v', output_bitrate])
+        ffmpeg_cmd.extend(['-avoid_negative_ts', '1', '-movflags', '+faststart', output_path])
+
+        self.rotation_is_processing = True
+        self.rotation_progress_var.set(0)
+        self.rotation_apply_btn.config(state="disabled")
+        self.rotation_stop_btn.config(state="normal")
+        th = threading.Thread(target=self.run_rotation_ffmpeg, args=(ffmpeg_cmd, output_path, video_duration))
+        th.start()
+
+    def run_rotation_ffmpeg(self, cmd, output_path, video_duration):
+        """执行旋转 FFmpeg（参考硬字幕：停止时发'q'优雅退出，使已生成部分可播放）"""
+        process = None
+        final_returncode = -1
+        rotation_user_stopped = False  # 是否用户点击停止（用于完成回调提示）
+        try:
+            if sys.platform == 'win32':
+                cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in cmd)
+                process = subprocess.Popen(
+                    cmd_str, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8',
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                process = subprocess.Popen(
+                    cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    universal_newlines=True, encoding='utf-8'
+                )
+            self.active_processes.append(process)
+            duration = video_duration
+            time_val = 0
+            rotation_sent_q = False  # 只发一次 'q'
+            for line in iter(process.stdout.readline, ''):
+                # 用户点击停止：向 FFmpeg 发送 'q' 优雅退出，已生成部分可播放（参考硬字幕保存进度）
+                if not self.rotation_is_processing:
+                    if not rotation_sent_q:
+                        rotation_sent_q = True
+                        rotation_user_stopped = True
+                        try:
+                            if process.stdin and not process.stdin.closed:
+                                process.stdin.write('q\n')
+                                process.stdin.flush()
+                                print("[DEBUG] 已发送'q'命令，FFmpeg 将保存当前进度并退出")
+                        except Exception as e:
+                            print(f"[DEBUG] 发送'q'失败: {e}")
+                    # 继续读输出直到进程退出，不立即 terminate
+                if line.strip():
+                    print(line.strip())
+                if 'Duration' in line and duration is None:
+                    try:
+                        dur_str = line.split('Duration: ')[1].split(',')[0].strip()
+                        h, m, s = map(float, dur_str.split(':'))
+                        duration = h * 3600 + m * 60 + s
+                    except Exception:
+                        pass
+                elif 'time=' in line and duration and duration > 0:
+                    try:
+                        time_str = line.split('time=')[1].split(' ')[0].strip()
+                        h, m, s = map(float, time_str.split(':'))
+                        time_val = h * 3600 + m * 60 + s
+                        progress = min((time_val / duration) * 100, 100)
+                        self.root.after(0, lambda p=progress: self.rotation_progress_var.set(p))
+                    except Exception:
+                        pass
+                if process.poll() is not None:
+                    break
+            try:
+                if process.stdout:
+                    process.stdout.close()
+            except Exception:
+                pass
+            # 若已发 'q' 但进程未退完，等待一段时间
+            if rotation_sent_q and process.poll() is None:
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+            else:
+                process.wait()
+            final_returncode = process.returncode
+            self.root.after(0, self.handle_rotation_completion, final_returncode, output_path, rotation_user_stopped)
+        except Exception as e:
+            self.root.after(0, messagebox.showerror, "错误", f"执行失败: {str(e)}")
+        finally:
+            if process is not None:
+                try:
+                    if process in self.active_processes:
+                        self.active_processes.remove(process)
+                    if process.poll() is None:
+                        try:
+                            process.terminate()
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                    if getattr(process, 'stdin', None) and process.stdin and not process.stdin.closed:
+                        try:
+                            process.stdin.close()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug(f"清理旋转进程时出错: {e}")
+            self.rotation_is_processing = False
+            self.root.after(0, lambda: self.rotation_apply_btn.config(state="normal"))
+            self.root.after(0, lambda: self.rotation_stop_btn.config(state="disabled"))
+            self.root.after(0, lambda: self.rotation_progress_var.set(0))
+
+    def handle_rotation_completion(self, returncode, output_path, user_stopped=False):
+        """旋转完成回调（参考硬字幕：用户停止且已有部分文件时视为已保存进度、可播放，不报错）"""
+        file_ok = os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        if returncode == 0 and file_ok:
+            output_dir = os.path.dirname(output_path)
+            try:
+                subprocess.run(['explorer', output_dir], creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception:
+                pass
+            messagebox.showinfo("完成", f"视频旋转成功！\n保存路径：{output_path}")
+        elif user_stopped and file_ok:
+            # 用户点击停止且已通过 'q' 保存了当前进度，部分视频可播放
+            output_dir = os.path.dirname(output_path)
+            try:
+                subprocess.run(['explorer', output_dir], creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception:
+                pass
+            messagebox.showinfo("已停止", "已保存当前进度，已生成部分视频可正常播放。\n路径：" + output_path)
+        elif file_ok:
+            # 未主动停止但 returncode != 0，仍提示完成并打开目录
+            output_dir = os.path.dirname(output_path)
+            try:
+                subprocess.run(['explorer', output_dir], creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception:
+                pass
+            messagebox.showinfo("完成", f"已生成视频（返回码：{returncode}）\n保存路径：{output_path}")
+        else:
+            err = "处理失败：\n"
+            if returncode != 0:
+                err += f"FFmpeg 返回码：{returncode}\n"
+            if not os.path.exists(output_path):
+                err += "输出文件未生成\n"
+            elif os.path.getsize(output_path) == 0:
+                err += "输出文件为空\n"
+                try:
+                    os.remove(output_path)
+                except Exception:
+                    pass
+            messagebox.showerror("错误", err + "请查看控制台输出")
+
+    def stop_rotation_process(self):
+        """停止旋转任务（与硬字幕停止一致：置标志，由 run 线程 terminate 进程）"""
+        self.rotation_is_processing = False
 
     def generate_output_path(self):
         """生成合法输出路径"""
@@ -6310,6 +6850,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         # 设置退出标志
         self.is_generating = False
+        self.rotation_is_processing = False
 
         # 终止所有活跃的FFmpeg进程
         self.terminate_all_processes()
@@ -6424,6 +6965,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         try:
             # 设置退出标志
             self.is_generating = False
+            self.rotation_is_processing = False
 
             # 优雅清理：优先使用'q'命令
             if self.active_processes:
