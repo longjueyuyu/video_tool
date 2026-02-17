@@ -2167,6 +2167,18 @@ class VideoTrimmerPro:
             self.root.after(0, lambda: self.control_btn.config(text="开始剪辑"))
             self.root.after(0, lambda: self.progress_var.set(0))  # 重置进度条
 
+    def _show_trim_success_toast(self, output_path, delay_ms=1000):
+        """显示剪切成功提示，1秒内自动关闭"""
+        win = tk.Toplevel(self.root)
+        win.title("完成")
+        win.transient(self.root)
+        win.resizable(False, False)
+        f = ttk.Frame(win, padding=12)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f, text=f"视频处理成功！\n保存路径：{output_path}", justify=tk.LEFT).pack(anchor=tk.W)
+        ttk.Button(f, text="确定", command=win.destroy).pack(pady=(10, 0))
+        win.after(delay_ms, win.destroy)
+
     def handle_completion(self, returncode, output_path):
         """处理完成回调"""
         # 检查输出文件是否存在且大小大于0
@@ -2174,7 +2186,7 @@ class VideoTrimmerPro:
             # 立即打开输出文件所在目录
             output_dir = os.path.dirname(output_path)
             subprocess.run(['explorer', output_dir], creationflags=subprocess.CREATE_NO_WINDOW)
-            messagebox.showinfo("完成", f"视频处理成功！\n保存路径：{output_path}")
+            self._show_trim_success_toast(output_path)
         else:
             error_msg = "处理失败：\n"
             if returncode != 0:
