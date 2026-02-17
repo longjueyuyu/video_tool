@@ -6,6 +6,7 @@ import datetime
 import threading
 import subprocess
 import os
+import re
 import sys
 import logging
 import signal
@@ -1000,6 +1001,17 @@ class VideoTrimmerPro:
         seconds = seconds % 60
         return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
 
+    def _natural_sort_key(self, s):
+        """将字符串拆分为文本和数字部分，用于文件名自然排序（如 文件名_1, 文件名_2, ..., 文件名_10）"""
+        if not isinstance(s, str):
+            return s
+        def try_int(x):
+            try:
+                return int(x)
+            except ValueError:
+                return x.lower()
+        return [try_int(part) for part in re.split(r'(\d+)', s)]
+
     def sort_tree_column(self, col):
         """对树形视图的列进行排序"""
         if self.sort_column == col:
@@ -1009,7 +1021,11 @@ class VideoTrimmerPro:
             self.sort_reverse = False
 
         items = [(self.video_tree.set(item, col), item) for item in self.video_tree.get_children('')]
-        items.sort(reverse=self.sort_reverse)
+        if col == "文件名":
+            # 文件名列使用自然排序，使 文件名_1, 文件名_2, ..., 文件名_10 顺序正确
+            items.sort(key=lambda x: self._natural_sort_key(x[0]), reverse=self.sort_reverse)
+        else:
+            items.sort(key=lambda x: x[0], reverse=self.sort_reverse)
 
         for index, (_, item) in enumerate(items):
             self.video_tree.move(item, '', index)
