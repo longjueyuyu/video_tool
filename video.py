@@ -646,9 +646,9 @@ class VideoTrimmerPro:
         self.drop_canvas = tk.Canvas(preview_frame, bg="#1e1e1e", bd=0, highlightthickness=0)
         self.drop_canvas.pack(fill=tk.BOTH, expand=True)
 
-        # 绑定重绘事件和拖放事件
+        # 绑定重绘事件和拖放事件；点击画布时先使时间输入框失焦（触发应用）
         self.drop_canvas.bind("<Configure>", self.redraw_drop_area)
-        self.drop_canvas.bind("<Button-1>", self.open_file_dialog)
+        self.drop_canvas.bind("<Button-1>", self._on_drop_canvas_click)
         # 注册拖放目标
         self.drop_canvas.drop_target_register(DND_FILES)
         self.drop_canvas.dnd_bind('<<Drop>>', self.handle_drop)
@@ -661,26 +661,66 @@ class VideoTrimmerPro:
         self.track_canvas = tk.Canvas(self.slider_frame, bg="#444444", height=30, bd=0, highlightthickness=0)
         self.track_canvas.pack(fill=tk.X)
 
-        # 绑定重绘事件
+        # 绑定重绘事件；点击轨道/滑块区域时使时间输入框失焦
         self.track_canvas.bind('<Configure>', self.redraw_track)
+        self.track_canvas.bind("<Button-1>", self._unfocus_time_entries)
+        self.slider_frame.bind("<Button-1>", self._unfocus_time_entries)
 
-        # 时间显示
+        # 时间显示（紧凑样式：深色输入框 + 小箭头，格式 HH:MM:SS.mmm）
         self.time_frame = tk.Frame(preview_frame, bg="#333333")
         self.time_frame.pack(fill=tk.X)
 
-        self.start_label = tk.Label(self.time_frame, text="开始时间：00:00:00.000", bg="#333333", fg="white")
-        self.start_label.pack(side=tk.LEFT, padx=20)
+        self._start_apply_timer = None
+        self._end_apply_timer = None
+        self._start_segment = 0
+        self._end_segment = 0
+        _time_font = ("Consolas", 9)
+        _entry_cnf = {"bg": "#444444", "fg": "#e0e0e0", "insertbackground": "#e0e0e0", "font": _time_font, "width": 12, "relief": "flat", "bd": 1, "highlightthickness": 0}
+        _arrow_cnf = {"bg": "#555555", "fg": "#e0e0e0", "font": ("", 8), "width": 1, "relief": "flat", "bd": 0, "cursor": "hand2", "activebackground": "#666666", "activeforeground": "#fff"}
 
-        self.end_label = tk.Label(self.time_frame, text="结束时间：00:00:00.000", bg="#333333", fg="white")
-        self.end_label.pack(side=tk.RIGHT, padx=20)
+        # 开始时间：标签 + 输入框 + 上下箭头（紧凑）
+        tk.Label(self.time_frame, text="开始时间：", bg="#333333", fg="#b0b0b0", font=("", 9)).pack(side=tk.LEFT, padx=(20, 2))
+        self.start_time_var = tk.StringVar(value="00:00:00.000")
+        self.start_entry = tk.Entry(self.time_frame, textvariable=self.start_time_var, **_entry_cnf)
+        self.start_entry.pack(side=tk.LEFT, padx=(0, 1), ipady=2, ipadx=2)
+        self.start_entry.bind("<Return>", lambda e: self._on_start_time_commit())
+        self.start_entry.bind("<FocusIn>", lambda e: self._update_start_segment_from_cursor())
+        self.start_entry.bind("<FocusOut>", lambda e: self._on_start_time_commit())
+        self.start_entry.bind("<KeyRelease>", self._on_start_entry_key)
+        self.start_entry.bind("<ButtonRelease>", lambda e: self._update_start_segment_from_cursor())
+        start_btn_frame = tk.Frame(self.time_frame, bg="#333333")
+        start_btn_frame.pack(side=tk.LEFT, padx=(0, 1))
+        self._start_spin_up_btn = tk.Button(start_btn_frame, text="▲", **_arrow_cnf, command=lambda: self._time_spin("start", 1))
+        self._start_spin_up_btn.pack(pady=(0, 0))
+        self._start_spin_down_btn = tk.Button(start_btn_frame, text="▼", **_arrow_cnf, command=lambda: self._time_spin("start", -1))
+        self._start_spin_down_btn.pack(pady=(0, 0))
+
+        # 结束时间
+        tk.Label(self.time_frame, text="结束时间：", bg="#333333", fg="#b0b0b0", font=("", 9)).pack(side=tk.LEFT, padx=(20, 2))
+        self.end_time_var = tk.StringVar(value="00:00:00.000")
+        self.end_entry = tk.Entry(self.time_frame, textvariable=self.end_time_var, **_entry_cnf)
+        self.end_entry.pack(side=tk.LEFT, padx=(0, 1), ipady=2, ipadx=2)
+        self.end_entry.bind("<Return>", lambda e: self._on_end_time_commit())
+        self.end_entry.bind("<FocusIn>", lambda e: self._update_end_segment_from_cursor())
+        self.end_entry.bind("<FocusOut>", lambda e: self._on_end_time_commit())
+        self.end_entry.bind("<KeyRelease>", self._on_end_entry_key)
+        self.end_entry.bind("<ButtonRelease>", lambda e: self._update_end_segment_from_cursor())
+        end_btn_frame = tk.Frame(self.time_frame, bg="#333333")
+        end_btn_frame.pack(side=tk.LEFT, padx=(0, 20))
+        self._end_spin_up_btn = tk.Button(end_btn_frame, text="▲", **_arrow_cnf, command=lambda: self._time_spin("end", 1))
+        self._end_spin_up_btn.pack(pady=(0, 0))
+        self._end_spin_down_btn = tk.Button(end_btn_frame, text="▼", **_arrow_cnf, command=lambda: self._time_spin("end", -1))
+        self._end_spin_down_btn.pack(pady=(0, 0))
 
         # 控制按钮
         self.control_btn = ttk.Button(preview_frame, text="开始剪辑", command=self.toggle_process)
         self.control_btn.pack(pady=5)
 
-        # 进度条
+        # 进度条；点击进度条或空白区域时使时间输入框失焦
         self.progress_bar = ttk.Progressbar(preview_frame, variable=self.progress_var, maximum=100)
         self.progress_bar.pack(fill=tk.X, padx=20, pady=5)
+        self.progress_bar.bind("<Button-1>", self._unfocus_time_entries)
+        preview_frame.bind("<Button-1>", self._unfocus_time_entries)
 
         # ========== 视频旋转标签页内容 ==========
         rotation_main = tk.Frame(self.rotation_tab, bg="#333333")
@@ -1942,7 +1982,7 @@ class VideoTrimmerPro:
         """将滑块位置转换为时间"""
         width = self.track_canvas.winfo_width()
         margin = 20
-        track_width = width - (2 * margin)
+        track_width = max(1, width - (2 * margin))  # 避免窗口未展开时除零
         position_ratio = (x - margin) / track_width
         return position_ratio * self.duration
 
@@ -1955,21 +1995,353 @@ class VideoTrimmerPro:
         return coords[2]
 
     def update_time_labels(self, start=None, end=None):
-        """更新时间显示"""
+        """更新时间显示（同步到开始/结束时间输入框）"""
         if start is not None:
-            self.start_label.config(text=f"开始时间：{self.format_time(start)}")
+            self.start_time_var.set(self.format_time(start))
         if end is not None:
-            self.end_label.config(text=f"结束时间：{self.format_time(end)}")
+            self.end_time_var.set(self.format_time(end))
 
     def format_time(self, seconds):
-        """优化后的时间格式化"""
+        """优化后的时间格式化。若 seconds 为负则按 0 处理。"""
+        seconds = max(0.0, float(seconds))
         total_seconds = int(seconds)
         milliseconds = int((seconds - total_seconds) * 1000)
         hours = total_seconds // 3600
         remainder = total_seconds % 3600
         minutes = remainder // 60
-        seconds = remainder % 60
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+        secs = remainder % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{milliseconds:03d}"
+
+    def parse_time_to_seconds(self, s):
+        """将时间字符串（如 00:24:03.959）解析为秒数，失败返回 None。支持小数点或逗号。"""
+        comp = self._parse_time_components(s)
+        if comp is None:
+            return None
+        h, m, s, ms = comp
+        return h * 3600 + m * 60 + s + ms / 1000.0
+
+    def _parse_time_components(self, s):
+        """解析时间为 (时, 分, 秒, 毫秒)，失败返回 None。"""
+        if not s or not isinstance(s, str):
+            return None
+        s = s.strip().replace(',', '.')
+        parts = s.split(':')
+        if len(parts) != 3:
+            return None
+        try:
+            h, m = int(parts[0]), int(parts[1])
+            sec_parts = parts[2].split('.')
+            sec = int(sec_parts[0])
+            ms = 0
+            if len(sec_parts) > 1 and sec_parts[1].strip():
+                ms = int(sec_parts[1][:3])
+            if h < 0 or m < 0 or sec < 0 or m >= 60 or sec >= 60 or ms > 999:
+                return None
+            return (h, m, sec, ms)
+        except (ValueError, IndexError):
+            return None
+
+    def time_to_position(self, seconds):
+        """将时间（秒）转换为轨道上的 x 坐标。自动限制在 [0, duration] 内。"""
+        if self.duration <= 0:
+            return 20
+        t = max(0.0, min(float(seconds), self.duration))
+        width = self.track_canvas.winfo_width()
+        margin = 20
+        track_width = max(1, width - 2 * margin)
+        ratio = t / self.duration
+        return margin + ratio * track_width
+
+    def set_slider_to_time(self, which, seconds):
+        """将开始或结束滑块移动到指定时间，并更新标签与预览画面。which 为 'start' 或 'end'。"""
+        if not self.video_path or self.duration <= 0:
+            return
+        if not hasattr(self, 'start_btn') or not hasattr(self, 'end_btn'):
+            return
+        width = self.track_canvas.winfo_width()
+        margin = 20
+        track_width = width - (2 * margin)
+        if track_width <= 0:
+            return
+        # 限制范围并与另一滑块保持至少 0.1 秒
+        if which == "start":
+            end_pos = self.get_slider_position("end")
+            end_t = self.position_to_time(end_pos) if end_pos is not None else self.duration
+            seconds = max(0.0, min(seconds, end_t - 0.1))
+        else:
+            start_pos = self.get_slider_position("start")
+            start_t = self.position_to_time(start_pos) if start_pos is not None else 0.0
+            seconds = max(start_t + 0.1, min(seconds, self.duration))
+        x = self.time_to_position(seconds)
+        height = self.track_canvas.winfo_height()
+        if which == "start":
+            coords_icon = [x - 8, height/2 - 15, x, height/2 - 5, x + 8, height/2 - 15]
+            coords_line = [x, height/2 - 5, x, height/2 + 15]
+            self.track_canvas.coords(self.start_btn, *coords_icon)
+            self.track_canvas.coords(self.start_line, *coords_line)
+            self.update_time_labels(start=seconds)
+        else:
+            coords_icon = [x - 8, height/2 - 15, x, height/2 - 5, x + 8, height/2 - 15]
+            coords_line = [x, height/2 - 5, x, height/2 + 15]
+            self.track_canvas.coords(self.end_btn, *coords_icon)
+            self.track_canvas.coords(self.end_line, *coords_line)
+            self.update_time_labels(end=seconds)
+        if self.current_preview_task:
+            self.current_preview_task = None
+        if self.preview_timer:
+            self.root.after_cancel(self.preview_timer)
+            self.preview_timer = None
+        if hasattr(self, '_update_timer') and self._update_timer is not None:
+            self.root.after_cancel(self._update_timer)
+        self.preview_enabled = True
+        self._update_timer = self.root.after(100, lambda: self.show_frame(seconds))
+
+    def _unfocus_time_entries(self, event=None):
+        """点击界面其他位置时使时间输入框失焦，从而触发 FocusOut 应用"""
+        w = self.root.focus_get()
+        if w in (self.start_entry, self.end_entry):
+            self.root.focus_set()
+
+    def _cursor_index_to_segment(self, index):
+        """将光标位置(0-12)映射到时段：0=时 1=分 2=秒 3=毫秒。格式 HH:MM:SS.mmm"""
+        try:
+            index = max(0, min(int(index), 12))
+        except (TypeError, ValueError):
+            return 0
+        if index <= 2:
+            return 0
+        if index <= 5:
+            return 1
+        if index <= 8:
+            return 2
+        return 3
+
+    def _update_start_segment_from_cursor(self):
+        """根据开始时间输入框光标位置更新当前选中的时段"""
+        try:
+            idx = self.start_entry.index(tk.INSERT)
+            self._start_segment = self._cursor_index_to_segment(idx)
+        except Exception:
+            pass
+
+    def _update_end_segment_from_cursor(self):
+        """根据结束时间输入框光标位置更新当前选中的时段"""
+        try:
+            idx = self.end_entry.index(tk.INSERT)
+            self._end_segment = self._cursor_index_to_segment(idx)
+        except Exception:
+            pass
+
+    def _on_start_entry_key(self, event=None):
+        self._update_start_segment_from_cursor()
+        self._schedule_start_time_apply()
+
+    def _on_end_entry_key(self, event=None):
+        self._update_end_segment_from_cursor()
+        self._schedule_end_time_apply()
+
+    def _time_spin(self, which, delta):
+        """按当前选中的时/分/秒/毫秒增减。which 为 'start' 或 'end'，delta 为 +1 或 -1。"""
+        if not self.video_path or self.duration <= 0:
+            return
+        # 点击箭头时取消 1 秒延迟应用，避免稍后 commit 覆盖本次调节结果
+        if which == "start":
+            if getattr(self, "_start_apply_timer", None):
+                try:
+                    self.root.after_cancel(self._start_apply_timer)
+                except Exception:
+                    pass
+                self._start_apply_timer = None
+            self._update_start_segment_from_cursor()
+            seg = self._start_segment
+        else:
+            if getattr(self, "_end_apply_timer", None):
+                try:
+                    self.root.after_cancel(self._end_apply_timer)
+                except Exception:
+                    pass
+                self._end_apply_timer = None
+            self._update_end_segment_from_cursor()
+            seg = self._end_segment
+        var = self.start_time_var if which == "start" else self.end_time_var
+        comp = self._parse_time_components(var.get().strip())
+        if comp is None:
+            return
+        h, m, s, ms = comp
+        # 时：增量上限按视频时长折算（超过 24 小时的视频允许 24+ 小时）
+        max_hour = int(self.duration // 3600)
+        if delta > 0:
+            if seg == 0:
+                h = min(max_hour, h + 1)
+            elif seg == 1:
+                m += 1
+                if m >= 60:
+                    m = 0
+                    h = min(max_hour, h + 1)
+            elif seg == 2:
+                s += 1
+                if s >= 60:
+                    s = 0
+                    m += 1
+                    if m >= 60:
+                        m = 0
+                        h = min(max_hour, h + 1)
+            else:
+                ms += 1
+                if ms >= 1000:
+                    ms = 0
+                    s += 1
+                    if s >= 60:
+                        s = 0
+                        m += 1
+                        if m >= 60:
+                            m = 0
+                            h = min(max_hour, h + 1)
+        else:
+            if seg == 0:
+                h = max(0, h - 1)
+            elif seg == 1:
+                m -= 1
+                if m < 0:
+                    m = 59
+                    h = max(0, h - 1)
+            elif seg == 2:
+                s -= 1
+                if s < 0:
+                    s = 59
+                    m -= 1
+                    if m < 0:
+                        m = 59
+                        h = max(0, h - 1)
+            else:
+                ms -= 1
+                if ms < 0:
+                    ms = 999
+                    s -= 1
+                    if s < 0:
+                        s = 59
+                        m -= 1
+                        if m < 0:
+                            m = 59
+                            h = max(0, h - 1)
+        total = h * 3600 + m * 60 + s + ms / 1000.0
+        total = max(0.0, min(total, self.duration))
+        if which == "start":
+            end_pos = self.get_slider_position("end")
+            end_t = self.position_to_time(end_pos) if end_pos is not None else self.duration
+            total = min(total, end_t - 0.1)
+        else:
+            start_pos = self.get_slider_position("start")
+            start_t = self.position_to_time(start_pos) if start_pos is not None else 0.0
+            total = max(total, start_t + 0.1)
+        new_str = self.format_time(total)
+        var.set(new_str)
+        self.set_slider_to_time(which, total)
+
+    def _on_drop_canvas_click(self, event=None):
+        """点击预览画布：先使时间输入框失焦，再执行打开文件"""
+        self._unfocus_time_entries(event)
+        self.open_file_dialog(event)
+
+    def _schedule_start_time_apply(self):
+        """开始时间输入后 1 秒无新输入则自动应用"""
+        if getattr(self, "_start_apply_timer", None):
+            self.root.after_cancel(self._start_apply_timer)
+        self._start_apply_timer = self.root.after(1000, self._delayed_start_time_commit)
+
+    def _delayed_start_time_commit(self):
+        """延迟 1 秒后执行开始时间应用"""
+        self._start_apply_timer = None
+        self._on_start_time_commit()
+
+    def _schedule_end_time_apply(self):
+        """结束时间输入后 1 秒无新输入则自动应用"""
+        if getattr(self, "_end_apply_timer", None):
+            self.root.after_cancel(self._end_apply_timer)
+        self._end_apply_timer = self.root.after(1000, self._delayed_end_time_commit)
+
+    def _delayed_end_time_commit(self):
+        """延迟 1 秒后执行结束时间应用"""
+        self._end_apply_timer = None
+        self._on_end_time_commit()
+
+    def _on_start_time_commit(self):
+        """开始时间输入框确认：校验并移动开始滑块、刷新预览"""
+        if getattr(self, "_start_apply_timer", None):
+            self.root.after_cancel(self._start_apply_timer)
+            self._start_apply_timer = None
+        # 若焦点移到了上下箭头按钮，不执行 commit，交给 _time_spin 处理，避免覆盖或无法调节
+        try:
+            w = self.root.focus_get()
+            if w in (getattr(self, "_start_spin_up_btn", None), getattr(self, "_start_spin_down_btn", None)):
+                return
+        except Exception:
+            pass
+        if not self.video_path or self.duration <= 0:
+            # FocusOut 时焦点已移走，不弹窗；仅回车或 1 秒延迟应用时若仍在该输入框则提示
+            try:
+                if self.root.focus_get() == self.start_entry:
+                    messagebox.showwarning("提示", "请先选择视频文件")
+            except Exception:
+                pass
+            return
+        s = self.start_time_var.get().strip()
+        t = self.parse_time_to_seconds(s)
+        if t is None:
+            messagebox.showerror("错误", "开始时间格式不正确，请使用 HH:MM:SS.mmm（如 00:24:03.959）")
+            self.start_time_var.set(self.format_time(self.position_to_time(self.get_slider_position("start") or 20)))
+            return
+        if t < 0:
+            messagebox.showwarning("提示", "开始时间不能早于 00:00:00.000")
+            t = 0
+        if t > self.duration:
+            messagebox.showwarning("提示", f"开始时间不能超过视频时长 {self.format_time(self.duration)}")
+            t = self.duration
+        end_pos = self.get_slider_position("end")
+        end_t = self.position_to_time(end_pos) if end_pos is not None else self.duration
+        if t >= end_t - 0.1:
+            t = max(0, end_t - 0.1)
+        self.set_slider_to_time("start", t)
+        self.start_time_var.set(self.format_time(t))
+
+    def _on_end_time_commit(self):
+        """结束时间输入框确认：校验并移动结束滑块、刷新预览"""
+        if getattr(self, "_end_apply_timer", None):
+            self.root.after_cancel(self._end_apply_timer)
+            self._end_apply_timer = None
+        try:
+            w = self.root.focus_get()
+            if w in (getattr(self, "_end_spin_up_btn", None), getattr(self, "_end_spin_down_btn", None)):
+                return
+        except Exception:
+            pass
+        if not self.video_path or self.duration <= 0:
+            try:
+                if self.root.focus_get() == self.end_entry:
+                    messagebox.showwarning("提示", "请先选择视频文件")
+            except Exception:
+                pass
+            return
+        s = self.end_time_var.get().strip()
+        t = self.parse_time_to_seconds(s)
+        if t is None:
+            messagebox.showerror("错误", "结束时间格式不正确，请使用 HH:MM:SS.mmm（如 00:29:25.923）")
+            end_pos = self.get_slider_position("end")
+            if end_pos is not None:
+                self.end_time_var.set(self.format_time(self.position_to_time(end_pos)))
+            return
+        if t < 0:
+            messagebox.showwarning("提示", "结束时间不能早于 00:00:00.000")
+            t = 0
+        if t > self.duration:
+            messagebox.showwarning("提示", f"结束时间不能超过视频时长 {self.format_time(self.duration)}")
+            t = self.duration
+        start_pos = self.get_slider_position("start")
+        start_t = self.position_to_time(start_pos) if start_pos is not None else 0.0
+        if t <= start_t + 0.1:
+            t = min(self.duration, start_t + 0.1)
+        self.set_slider_to_time("end", t)
+        self.end_time_var.set(self.format_time(t))
 
     def toggle_process(self):
         """切换处理状态"""
@@ -6875,6 +7247,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     def on_closing(self):
         """窗口关闭时的处理"""
         print("[DEBUG] 程序正在关闭，清理所有进程...")
+
+        # 取消剪切页时间输入框的 1 秒自动应用定时器，避免关闭后回调执行
+        if getattr(self, "_start_apply_timer", None):
+            try:
+                self.root.after_cancel(self._start_apply_timer)
+            except Exception:
+                pass
+            self._start_apply_timer = None
+        if getattr(self, "_end_apply_timer", None):
+            try:
+                self.root.after_cancel(self._end_apply_timer)
+            except Exception:
+                pass
+            self._end_apply_timer = None
 
         # 设置退出标志
         self.is_generating = False
