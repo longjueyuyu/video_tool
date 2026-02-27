@@ -310,6 +310,13 @@ class VideoTrimmerPro:
         self.rotation_current_preview_task = None
         self.rotation_preview_timer = None
 
+        # 竖屏三屏相关
+        self.triple_cap = None
+        self.triple_duration = 0.0
+        self.triple_fps = 30
+        self.triple_total_frames = 0
+        self.triple_is_generating = False
+
         # 创建界面组件
         self.create_widgets()
 
@@ -346,6 +353,11 @@ class VideoTrimmerPro:
         # 视频旋转标签页
         self.rotation_tab = ttk.Frame(self.tab_control)
         self.tab_control.add(self.rotation_tab, text="视频旋转")
+
+        # 竖屏三屏标签页（竖屏视频三屏填充成横屏）
+        self.triple_screen_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.triple_screen_tab, text="竖屏三屏")
+        self._create_triple_screen_tab()
 
         # 硬字幕标签页
         self.subtitle_tab = ttk.Frame(self.tab_control)
@@ -815,6 +827,96 @@ class VideoTrimmerPro:
         self.rotation_progress_bar = ttk.Progressbar(rotation_main, variable=self.rotation_progress_var, maximum=100)
         self.rotation_progress_bar.pack(fill=tk.X, pady=5)
 
+    def _create_triple_screen_tab(self):
+        """竖屏三屏：选择竖屏视频，三屏画面填充成横屏，支持预览拖动、GPU、比特率、进度与停止"""
+        main = tk.Frame(self.triple_screen_tab, bg="#333333")
+        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main.grid_rowconfigure(1, weight=1)
+        main.grid_columnconfigure(0, weight=1)
+
+        # 文件选择
+        file_f = tk.Frame(main, bg="#333333")
+        file_f.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(file_f, text="视频文件：").pack(side=tk.LEFT, padx=(0, 5))
+        self.triple_video_path_var = tk.StringVar()
+        ttk.Entry(file_f, textvariable=self.triple_video_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(file_f, text="选择视频", command=self.select_triple_screen_video).pack(side=tk.LEFT, padx=(0, 15))
+
+        # 预览区域
+        preview_f = tk.Frame(main, bg="#1e1e1e")
+        preview_f.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        preview_f.grid_rowconfigure(0, weight=1)
+        preview_f.grid_columnconfigure(0, weight=1)
+        self.triple_preview_canvas = tk.Canvas(preview_f, bg="#1e1e1e", bd=0, highlightthickness=0)
+        self.triple_preview_canvas.pack(fill=tk.BOTH, expand=True)
+        self.triple_preview_canvas.bind("<Configure>", self._redraw_triple_screen_drop_area)
+        self.triple_preview_canvas.bind("<Button-1>", lambda e: self.select_triple_screen_video())  # 与旋转页一致：点击预览区域直接选择视频
+        self.triple_preview_canvas.drop_target_register(DND_FILES)
+        self.triple_preview_canvas.dnd_bind('<<Drop>>', self.handle_drop)
+
+        # 播放进度条（拖动预览三屏效果）
+        slider_f = tk.Frame(main, bg="#333333")
+        slider_f.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(slider_f, text="播放进度：").pack(side=tk.LEFT, padx=(0, 5))
+        self.triple_playback_slider = ttk.Scale(
+            slider_f, from_=0, to=100, orient=tk.HORIZONTAL,
+            command=self._on_triple_screen_playback_change
+        )
+        self.triple_playback_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        # 控制行：原比特率、GPU、合成比特率、按钮
+        ctrl_f = tk.Frame(main, bg="#333333")
+        ctrl_f.pack(fill=tk.X, pady=(0, 10))
+        style_f = tk.Frame(ctrl_f, bg="#333333")
+        style_f.pack(side=tk.LEFT, fill=tk.X)
+        ttk.Label(style_f, text="原视频比特率：").pack(side=tk.LEFT)
+        self.triple_original_bitrate_var = tk.StringVar(value="未选择视频")
+        tk.Label(style_f, textvariable=self.triple_original_bitrate_var, foreground="white", bg="#2d4a5e", relief=tk.RAISED, padx=5, pady=2).pack(side=tk.LEFT, padx=(0, 15))
+        ttk.Label(style_f, text="GPU加速：").pack(side=tk.LEFT, padx=(0, 5))
+        self.triple_gpu_var = tk.StringVar(value="无GPU")
+        triple_gpu_opts = [
+            {"label": "无GPU", "value": ""},
+            {"label": "NVIDIA显卡", "value": "h264_nvenc"},
+            {"label": "NVIDIA高性能", "value": "h264_nvenc_fast"},
+            {"label": "Intel集成显卡", "value": "hevc_qsv"},
+            {"label": "AMD 显卡", "value": "av1_amf"},
+            {"label": "VAAPI", "value": "h264_vaapi"}
+        ]
+        triple_gpu_combo = ttk.Combobox(
+            style_f, textvariable=self.triple_gpu_var,
+            values=[o["label"] for o in triple_gpu_opts],
+            state="readonly", width=10
+        )
+        triple_gpu_combo.pack(side=tk.LEFT, padx=(0, 15))
+        self.triple_gpu_mapping = {o["label"]: o["value"] for o in triple_gpu_opts}
+        btn_f = tk.Frame(ctrl_f, bg="#333333")
+        btn_f.pack(side=tk.RIGHT)
+        self.triple_generate_btn = ttk.Button(btn_f, text="生成横屏三屏视频", command=self.generate_triple_screen_video, width=14)
+        self.triple_generate_btn.pack(side=tk.LEFT, padx=5)
+        self.triple_stop_btn = ttk.Button(btn_f, text="停止", command=self.stop_triple_screen_process, width=10, state="disabled")
+        self.triple_stop_btn.pack(side=tk.LEFT, padx=5)
+
+        # 生成进度条
+        self.triple_progress_var = tk.DoubleVar()
+        self.triple_progress_bar = ttk.Progressbar(main, variable=self.triple_progress_var, maximum=100)
+        self.triple_progress_bar.pack(fill=tk.X, pady=5)
+
+    def _redraw_triple_screen_drop_area(self, event=None):
+        """竖屏三屏页：未加载时显示拖放提示，已加载时按当前进度重绘三屏帧"""
+        if not getattr(self, 'triple_video_path_var', None) or not self.triple_video_path_var.get():
+            self.triple_preview_canvas.delete("all")
+            w = self.triple_preview_canvas.winfo_width()
+            h = self.triple_preview_canvas.winfo_height()
+            if w > 10 and h > 10:
+                self.triple_preview_canvas.create_text(w/2, h/2 - 20, text="+", font=("Arial", 48), fill="#666666")
+                self.triple_preview_canvas.create_text(w/2, h/2 + 20, text="请选择竖屏视频", font=("微软雅黑", 12), fill="#888888")
+        elif getattr(self, 'triple_duration', 0) > 0 and getattr(self, 'triple_playback_slider', None):
+            try:
+                pos = (float(self.triple_playback_slider.get()) / 100.0) * self.triple_duration
+                self.show_triple_screen_frame(pos)
+            except Exception:
+                pass
+
     def _redraw_rotation_drop_area(self, event=None):
         """旋转页未加载视频时重绘拖放提示"""
         if not getattr(self, 'rotation_video_path_var', None) or not self.rotation_video_path_var.get():
@@ -940,6 +1042,9 @@ class VideoTrimmerPro:
         elif current_tab == self.tab_control.tabs()[2]:  # 视频旋转标签页
             print(f"[DEBUG] 在视频旋转标签页，加载第一个视频文件")
             self.load_rotation_video(video_files[0])
+        elif current_tab == self.tab_control.tabs()[3]:  # 竖屏三屏标签页
+            print(f"[DEBUG] 在竖屏三屏标签页，加载第一个视频文件")
+            self.load_triple_screen_video(video_files[0])
         else:  # 合并标签页
             print(f"[DEBUG] 在合并标签页，开始处理 {len(video_files)} 个文件到合并列表")
             for file_path in video_files:
@@ -3009,6 +3114,343 @@ class VideoTrimmerPro:
     def stop_rotation_process(self):
         """停止旋转任务（与硬字幕停止一致：置标志，由 run 线程 terminate 进程）"""
         self.rotation_is_processing = False
+
+    def select_triple_screen_video(self):
+        """选择竖屏视频文件"""
+        file_path = filedialog.askopenfilename(
+            title="选择竖屏视频文件",
+            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.flv *.ts *.wmv")]
+        )
+        if file_path:
+            self.triple_video_path_var.set(file_path)
+            self.load_triple_screen_video(file_path)
+
+    def load_triple_screen_video(self, path):
+        """加载竖屏三屏页视频（与旋转页一致的中文路径与 cv2 处理）"""
+        try:
+            abs_path = os.path.abspath(path)
+            try:
+                abs_path = abs_path.encode('utf-8', errors='ignore').decode('utf-8')
+            except UnicodeEncodeError:
+                abs_path = abs_path.encode(sys.getfilesystemencoding(), errors='ignore').decode(sys.getfilesystemencoding())
+            cap = cv2.VideoCapture(abs_path)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(abs_path, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                raise Exception("无法打开视频文件，请确保视频格式受支持")
+            if self.triple_cap is not None:
+                self.triple_cap.release()
+            self.triple_cap = cap
+            self.triple_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            self.triple_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.triple_duration = self.triple_total_frames / self.triple_fps if self.triple_fps > 0 else 0
+            self.triple_video_path_var.set(abs_path)
+            bitrate_k = self._get_triple_screen_bitrate_kbps(abs_path)
+            if bitrate_k is not None and bitrate_k > 0:
+                self.triple_original_bitrate_var.set(f"{bitrate_k}k")
+            else:
+                self.triple_original_bitrate_var.set("未知")
+            self.triple_playback_slider.set(0)
+            self.show_triple_screen_frame(0)
+        except Exception as e:
+            messagebox.showerror("错误", f"加载失败: {str(e)}")
+
+    def _on_triple_screen_playback_change(self, value):
+        """拖动播放进度条时预览三屏效果"""
+        if self.triple_is_generating or not self.triple_duration:
+            return
+        try:
+            pos = (float(value) / 100.0) * self.triple_duration
+            self.show_triple_screen_frame(pos)
+        except Exception:
+            pass
+
+    def show_triple_screen_frame(self, position):
+        """在预览画布上显示指定时间点的三屏拼接帧（竖屏同帧复制三份横排）"""
+        if self.triple_is_generating or not getattr(self, 'triple_cap', None) or not self.triple_cap.isOpened():
+            return
+        path = self.triple_video_path_var.get()
+        if not path or not os.path.exists(path):
+            return
+        try:
+            frame_idx = int(position * self.triple_fps)
+            frame_idx = max(0, min(frame_idx, self.triple_total_frames - 1)) if self.triple_total_frames else 0
+            self.triple_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = self.triple_cap.read()
+            if not ret or frame is None:
+                return
+            # 三屏横排：同一帧复制三份横拼
+            three = cv2.hconcat([frame, frame, frame])
+            h, w = three.shape[:2]
+            cw = self.triple_preview_canvas.winfo_width()
+            ch = self.triple_preview_canvas.winfo_height()
+            if cw <= 1 or ch <= 1:
+                cw, ch = 800, 450
+            scale = min(cw / w, ch / h)
+            nw, nh = int(w * scale), int(h * scale)
+            if nw <= 0 or nh <= 0:
+                return
+            resized = cv2.resize(three, (nw, nh))
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb)
+            photo = ImageTk.PhotoImage(image=pil_img)
+            self.triple_preview_canvas.delete("all")
+            self.triple_preview_canvas.create_image(cw // 2, ch // 2, image=photo, anchor=tk.CENTER)
+            self.triple_preview_canvas.image = photo
+        except Exception as e:
+            logger.debug(f"竖屏三屏预览失败: {e}")
+
+    def _get_triple_screen_bitrate_kbps(self, video_path):
+        """获取原视频视频流比特率（kbps），与旋转/硬字幕一致。失败返回 None。"""
+        try:
+            ffprobe_cmd = [
+                find_ffprobe_path(),
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=bit_rate',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                video_path
+            ]
+            if sys.platform == 'win32':
+                cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in ffprobe_cmd)
+                result = subprocess.run(
+                    cmd_str, shell=True, capture_output=True, text=True, encoding='utf-8',
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                result = subprocess.run(
+                    ffprobe_cmd, capture_output=True, text=True, encoding='utf-8'
+                )
+            if result.returncode == 0 and result.stdout.strip():
+                bitrate_bps = int(result.stdout.strip())
+                return int(bitrate_bps / 1000)
+            ffprobe_cmd_fmt = [
+                find_ffprobe_path(), '-v', 'error', '-show_entries', 'format=bit_rate',
+                '-of', 'default=noprint_wrappers=1:nokey=1', video_path
+            ]
+            if sys.platform == 'win32':
+                cmd_str = ' '.join(f'"{arg}"' if ' ' in arg or any(ord(c) > 127 for c in arg) else arg for arg in ffprobe_cmd_fmt)
+                result = subprocess.run(cmd_str, shell=True, capture_output=True, text=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                result = subprocess.run(ffprobe_cmd_fmt, capture_output=True, text=True, encoding='utf-8')
+            if result.returncode == 0 and result.stdout.strip():
+                bitrate_bps = int(result.stdout.strip())
+                return int(bitrate_bps / 1000)
+        except Exception as e:
+            logger.debug(f"获取竖屏三屏原视频比特率失败: {e}")
+        return None
+
+    def disable_triple_screen_buttons(self):
+        """生成中禁用竖屏三屏相关按钮"""
+        if hasattr(self, 'triple_generate_btn'):
+            self.triple_generate_btn.config(text="生成中...", state="disabled")
+        if hasattr(self, 'triple_stop_btn'):
+            self.triple_stop_btn.config(state="normal")
+
+    def enable_triple_screen_buttons(self):
+        """完成后恢复竖屏三屏按钮"""
+        if hasattr(self, 'triple_generate_btn'):
+            self.triple_generate_btn.config(text="生成横屏三屏视频", state="normal")
+        if hasattr(self, 'triple_stop_btn'):
+            self.triple_stop_btn.config(state="disabled")
+
+    def generate_triple_screen_video(self):
+        """生成竖屏三屏横屏视频：同一竖屏视频三份横排。与旋转一致使用原视频比特率，画质接近原片。"""
+        path = self.triple_video_path_var.get()
+        if not path or not os.path.exists(path):
+            messagebox.showerror("错误", "请先选择有效的竖屏视频文件")
+            return
+        abs_path = os.path.abspath(path)
+        base, ext = os.path.splitext(abs_path)
+        counter = 1
+        while True:
+            output_path = f"{base}_triple_{counter}{ext}"
+            if not os.path.exists(output_path):
+                break
+            counter += 1
+        save_path = filedialog.asksaveasfilename(
+            title="选择保存位置",
+            initialfile=os.path.basename(output_path),
+            defaultextension=".mp4",
+            filetypes=[("MP4文件", "*.mp4"), ("TS文件", "*.ts")]
+        )
+        if not save_path:
+            return
+        # 与旋转一致：使用原视频比特率，画质接近原片（参考 apply_rotation / _get_rotation_video_bitrate_kbps）
+        source_bitrate_kbps = self._get_triple_screen_bitrate_kbps(abs_path)
+        if source_bitrate_kbps is None or source_bitrate_kbps <= 0:
+            source_bitrate_kbps = 5000
+            print("[DEBUG] 竖屏三屏：未获取到原视频比特率，使用默认 5000k")
+        else:
+            print(f"[DEBUG] 竖屏三屏：使用原视频比特率 {source_bitrate_kbps}k（与旋转一致）")
+        output_bitrate = f"{source_bitrate_kbps}k"
+        gpu_opt = self.triple_gpu_var.get()
+        encoder = self.triple_gpu_mapping.get(gpu_opt, "")
+        video_duration = self.triple_duration
+        out_fps = getattr(self, 'triple_fps', 30) or 30
+        # FFmpeg: 同一路视频 split=3 再 hstack 成横屏；-r 与源一致保持清晰度
+        ffmpeg_cmd = [
+            FFMPEG_PATH, '-y', '-i', abs_path,
+            '-filter_complex', '[0:v]split=3[a][b][c];[a][b][c]hstack=inputs=3,format=yuv420p[outv]',
+            '-map', '[outv]', '-map', '0:a?',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-r', f'{out_fps:.0f}',  # 输出帧率与原视频一致
+        ]
+        if encoder:
+            if encoder == "h264_nvenc_fast":
+                ffmpeg_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-b:v', output_bitrate])
+            elif encoder == "h264_nvenc":
+                ffmpeg_cmd.extend(['-c:v', encoder, '-preset', 'p4', '-b:v', output_bitrate])
+            elif encoder in ("hevc_qsv", "h264_qsv", "h265_qsv"):
+                ffmpeg_cmd.extend(['-c:v', encoder, '-b:v', output_bitrate])
+            elif encoder in ("h264_amf", "av1_amf"):
+                ffmpeg_cmd.extend(['-c:v', encoder, '-b:v', output_bitrate])
+            elif encoder == "h264_vaapi":
+                ffmpeg_cmd.extend(['-c:v', encoder, '-b:v', output_bitrate])
+            else:
+                ffmpeg_cmd.extend(['-c:v', encoder, '-b:v', output_bitrate])
+        else:
+            # 软件编码：yuv420p 兼容性与清晰度与常见输出一致
+            ffmpeg_cmd.extend(['-c:v', 'libx264', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-b:v', output_bitrate])
+        ffmpeg_cmd.extend(['-avoid_negative_ts', '1', '-movflags', '+faststart', save_path])
+        self.triple_is_generating = True
+        self.triple_progress_var.set(0)
+        self.disable_triple_screen_buttons()
+        th = threading.Thread(target=self.run_triple_screen_ffmpeg, args=(ffmpeg_cmd, save_path, video_duration))
+        th.start()
+
+    def run_triple_screen_ffmpeg(self, cmd, output_path, video_duration):
+        """执行竖屏三屏 FFmpeg（与硬字幕/旋转一致：进度条、停止发 q、进程加入 active_processes）"""
+        process = None
+        final_returncode = -1
+        triple_user_stopped = False
+        try:
+            if sys.platform == 'win32':
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    preexec_fn=os.setsid
+                )
+            self.active_processes.append(process)
+            if hasattr(process, 'daemon'):
+                process.daemon = True
+            import time
+            last_progress = 0
+            while True:
+                if process.poll() is not None:
+                    break
+                if not self.triple_is_generating:
+                    triple_user_stopped = True
+                    try:
+                        if process.stdin and not process.stdin.closed:
+                            process.stdin.write('q\n')
+                            process.stdin.flush()
+                    except Exception:
+                        pass
+                    break
+                try:
+                    if sys.platform != 'win32':
+                        import select
+                        ready, _, _ = select.select([process.stderr], [], [], 0.1)
+                        line = process.stderr.readline() if ready else None
+                    else:
+                        line = process.stderr.readline()
+                    if line:
+                        line = line.strip()
+                        if 'time=' in line:
+                            try:
+                                time_str = line.split('time=')[1].split(' ')[0].strip()
+                                h, m, s = map(float, time_str.split(':'))
+                                current_time = h * 3600 + m * 60 + s
+                                progress = (current_time / video_duration) * 100
+                                progress = min(progress, 98)
+                                if progress > last_progress:
+                                    last_progress = progress
+                                    self.root.after(0, lambda p=progress: self.triple_progress_var.set(p))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                time.sleep(0.1)
+            returncode = process.poll()
+            if returncode is None:
+                try:
+                    returncode = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    returncode = getattr(process, 'returncode', -1) or -1
+            final_returncode = returncode if returncode is not None else -1
+            try:
+                if process.stdin and not process.stdin.closed:
+                    process.stdin.close()
+            except Exception:
+                pass
+            try:
+                stdout, stderr = process.communicate(timeout=2)
+            except Exception:
+                pass
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0 and final_returncode == 0:
+                self.root.after(0, lambda: self.triple_progress_var.set(100))
+            self.root.after(0, self.handle_triple_screen_completion, final_returncode, output_path, triple_user_stopped)
+        except Exception as e:
+            logger.error(f"竖屏三屏生成异常: {e}")
+            self.root.after(0, messagebox.showerror, "错误", str(e))
+        finally:
+            if process is not None:
+                try:
+                    if process in self.active_processes:
+                        self.active_processes.remove(process)
+                    for pipe_name in ['stdin', 'stdout', 'stderr']:
+                        pipe = getattr(process, pipe_name, None)
+                        if pipe and not pipe.closed:
+                            try:
+                                pipe.close()
+                            except Exception:
+                                pass
+                    if process.poll() is None:
+                        try:
+                            process.terminate()
+                            process.wait(timeout=2)
+                        except Exception:
+                            try:
+                                process.kill()
+                                process.wait(timeout=1)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            self.triple_is_generating = False
+            self.root.after(0, self.enable_triple_screen_buttons)
+            if final_returncode != 0:
+                self.root.after(0, lambda: self.triple_progress_var.set(0))
+
+    def stop_triple_screen_process(self):
+        """停止竖屏三屏生成（与硬字幕/旋转一致）"""
+        self.triple_is_generating = False
+
+    def handle_triple_screen_completion(self, returncode, output_path, user_stopped=False):
+        """竖屏三屏生成完成回调"""
+        if user_stopped and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            messagebox.showinfo("已停止", "已保存当前进度，已生成部分视频可正常播放。\n路径：" + output_path)
+        elif returncode == 0:
+            messagebox.showinfo("完成", "横屏三屏视频生成完成。\n路径：" + output_path)
+        else:
+            self.triple_progress_var.set(0)
 
     def generate_output_path(self):
         """生成合法输出路径"""
@@ -7380,6 +7822,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             # 设置退出标志
             self.is_generating = False
             self.rotation_is_processing = False
+            self.triple_is_generating = False
+            # 释放竖屏三屏预览
+            if getattr(self, 'triple_cap', None) is not None:
+                try:
+                    self.triple_cap.release()
+                except Exception:
+                    pass
+                self.triple_cap = None
 
             # 优雅清理：优先使用'q'命令
             if self.active_processes:
